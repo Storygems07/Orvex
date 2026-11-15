@@ -7,17 +7,38 @@ ONE FILE, EVERYTHING INSIDE.
   python orvex.py --export    writes requirements.txt, Dockerfile and README.md for online hosting
                               (Hugging Face Spaces / Render), so you never need extra files
 
-The "Phone" button in the website shows a QR code for other devices.
+NEW:
+  * Sign up / Sign in (accounts saved in orvex_users.db next to this file)
+  * Free Gemini API key for the AI buttons (save it in a .env file as GEMINI_API_KEY=..., or in gemini_key.txt,
+    or set GEMINI_API_KEY, or paste it in Settings). Get one free at https://aistudio.google.com/apikey
+  * QR code on the home page to open ORVEX on your phone
+  * Wake word: say "Orvex" then your command
+
+ADDED IN THIS VERSION:
+  * .env support (no extra package needed): keys and options are read from a .env file next to orvex.py
+  * Wake word hardening: reacts as soon as "Orvex" is heard, never answers the same wake word twice,
+    and backs off instead of spinning the CPU if the microphone keeps failing
+  * Live audio can now capture system audio (Entire screen -> "Share system audio" on Windows Chrome/Edge)
+  * Floating translation window: a small always-on-top, semi-transparent, draggable desktop window
+    (started from the Live audio panel, uses Python's built-in tkinter)
+  * Translation fallback: Google Translate first, free MyMemory service if Google fails or is rate-limited
+  * More languages in every language list
 
 Installable as an app (PWA) on laptop and phone. Speech recognition runs locally (faster-whisper),
 OCR runs in the browser (Tesseract.js), only TEXT goes to Google Translate.
 """
 import io
 import os
+import re
+import secrets
 import socket
+import sqlite3
+import tempfile
 import threading
+import time
 
-from flask import Flask, Response, jsonify, request
+from flask import Flask, Response, jsonify, request, session
+from werkzeug.security import check_password_hash, generate_password_hash
 
 try:
     from langdetect import DetectorFactory, detect_langs
@@ -29,6 +50,206 @@ except ImportError:
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 8 * 1024 * 1024  # reject huge uploads
+
+# ---------------------------------------------------------------------------
+# ACCOUNTS: sign up / sign in. Users are kept in a small SQLite file (orvex_users.db)
+# next to orvex.py. Passwords are stored as salted hashes, never as plain text.
+# ---------------------------------------------------------------------------
+
+
+def _writable(p):
+    try:
+        os.makedirs(p, exist_ok=True)
+        t = os.path.join(p, ".w")
+        open(t, "w").close()
+        os.remove(t)
+        return True
+    except OSError:
+        return False
+
+
+DATA_DIR = os.environ.get("ORVEX_DATA") or os.path.dirname(os.path.abspath(__file__))
+if not _writable(DATA_DIR):
+    DATA_DIR = os.path.join(tempfile.gettempdir(), "orvex-data")
+    os.makedirs(DATA_DIR, exist_ok=True)
+DB_PATH = os.path.join(DATA_DIR, "orvex_users.db")
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _load_dotenv():
+    """Reads KEY=value lines from a .env file next to orvex.py into the environment.
+    Real environment variables always win. No extra package needed. Never commit .env to GitHub."""
+    folders = []
+    for f in (os.path.dirname(os.path.abspath(__file__)), DATA_DIR):
+        if f not in folders:
+            folders.append(f)
+    for folder in folders:
+        try:
+            with open(os.path.join(folder, ".env"), encoding="utf-8-sig") as fh:
+                for raw in fh:
+                    line = raw.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    k, v = line.split("=", 1)
+                    k = k.strip()
+                    if k.lower().startswith("export "):
+                        k = k[7:].strip()
+                    v = v.strip()
+                    if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+                        v = v[1:-1]
+                    elif " #" in v:
+                        v = v.split(" #", 1)[0].strip()
+                    if k and v:
+                        os.environ.setdefault(k, v)
+        except OSError:
+            continue
+
+
+_load_dotenv()
+
+
+def _secret_key():
+    s = os.environ.get("ORVEX_SECRET")
+    if s:
+        return s
+    p = os.path.join(DATA_DIR, ".orvex_secret")
+    try:
+        with open(p, encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        s = secrets.token_hex(32)
+        try:
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(s)
+        except OSError:
+            pass
+        return s
+
+
+app.secret_key = _secret_key()
+app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax", PERMANENT_SESSION_LIFETIME=60 * 60 * 24 * 30)
+
+
+def db():
+    c = sqlite3.connect(DB_PATH)
+    c.row_factory = sqlite3.Row
+    return c
+
+
+def init_db():
+    c = db()
+    try:
+        c.execute("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, "
+                  "email TEXT NOT NULL UNIQUE, pw TEXT NOT NULL, created REAL NOT NULL)")
+        c.commit()
+    finally:
+        c.close()
+
+
+init_db()
+_FAILS = {}
+
+
+def _locked(key):
+    n, t = _FAILS.get(key, (0, 0.0))
+    if time.time() - t > 60:
+        _FAILS.pop(key, None)
+        return False
+    return n >= 5
+
+
+def _fail(key):
+    n, t = _FAILS.get(key, (0, 0.0))
+    if time.time() - t > 60:
+        n = 0
+    _FAILS[key] = (n + 1, time.time())
+
+
+def current_user():
+    uid = session.get("uid")
+    if not uid:
+        return None
+    c = db()
+    try:
+        r = c.execute("SELECT id, name, email FROM users WHERE id=?", (uid,)).fetchone()
+    finally:
+        c.close()
+    return dict(r) if r else None
+
+
+# "/api/overlay/poll" is open to the login check because the floating window (a separate local program)
+# has no browser session; it is protected by a random per-run token and only answers this computer.
+OPEN_API = {"/api/health", "/api/config", "/api/me", "/api/login", "/api/signup", "/api/logout", "/api/lan-url", "/api/overlay/poll"}
+
+
+@app.before_request
+def require_login():
+    if request.path.startswith("/api/") and request.path not in OPEN_API and not current_user():
+        return jsonify(error="Please sign in first."), 401
+
+
+@app.post("/api/signup")
+def signup():
+    d = request.get_json(silent=True) or {}
+    name = (d.get("name") or "").strip()[:60]
+    email = (d.get("email") or "").strip().lower()[:120]
+    pw = d.get("password") or ""
+    if not name:
+        return jsonify(error="Please enter your name."), 400
+    if not EMAIL_RE.match(email):
+        return jsonify(error="That email doesn't look right."), 400
+    if len(pw) < 8 or len(pw) > 200:
+        return jsonify(error="Password must be at least 8 characters."), 400
+    c = db()
+    try:
+        c.execute("INSERT INTO users (name, email, pw, created) VALUES (?, ?, ?, ?)",
+                  (name, email, generate_password_hash(pw), time.time()))
+        c.commit()
+        uid = c.execute("SELECT id FROM users WHERE email=?", (email,)).fetchone()["id"]
+    except sqlite3.IntegrityError:
+        return jsonify(error="An account with this email already exists. Try signing in."), 409
+    finally:
+        c.close()
+    session.clear()
+    session["uid"] = uid
+    session.permanent = True
+    return jsonify(user={"name": name, "email": email})
+
+
+@app.post("/api/login")
+def login():
+    d = request.get_json(silent=True) or {}
+    email = (d.get("email") or "").strip().lower()[:120]
+    pw = d.get("password") or ""
+    key = (request.remote_addr or "") + "|" + email
+    if _locked(key):
+        return jsonify(error="Too many tries. Please wait a minute and try again."), 429
+    c = db()
+    try:
+        row = c.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
+    finally:
+        c.close()
+    if not row or not check_password_hash(row["pw"], pw):
+        _fail(key)
+        return jsonify(error="Wrong email or password."), 401
+    _FAILS.pop(key, None)
+    session.clear()
+    session["uid"] = row["id"]
+    session.permanent = True
+    return jsonify(user={"name": row["name"], "email": row["email"]})
+
+
+@app.get("/api/me")
+def me():
+    u = current_user()
+    return jsonify(user={"name": u["name"], "email": u["email"]} if u else None)
+
+
+@app.post("/api/logout")
+def logout():
+    session.clear()
+    return jsonify(ok=True)
+
 
 # ---------------------------------------------------------------------------
 # FRONTEND (HTML + CSS + JavaScript)
@@ -280,6 +501,20 @@ html[data-contrast="1"] .sub-tr{color:#fff;background:none}
 .hood .chips2 span{font-size:.78rem;padding:.3rem .8rem;border-radius:999px;border:1px solid var(--line);color:var(--mut);background:var(--glass)}
 .hood .chips2 b{color:var(--ink)}
 .kbtn{font-size:.72rem}
+/* sign in / sign up */
+.authwrap{position:fixed;inset:0;z-index:100;display:grid;place-items:center;padding:1rem;background:rgba(4,3,12,.93);backdrop-filter:blur(14px);overflow-y:auto}
+.authcard{width:min(420px,100%);padding:1.6rem;border-radius:1.8rem;background:rgba(13,11,36,.97);border:1px solid var(--line);box-shadow:0 30px 90px rgba(0,0,0,.65),0 0 60px rgba(124,92,255,.25);display:flex;flex-direction:column;gap:.9rem}
+.authcard .logo{justify-content:center;font-size:1.8rem}
+.tabs2{display:grid;grid-template-columns:1fr 1fr;gap:.4rem;padding:.3rem;border-radius:999px;background:rgba(255,255,255,.07)}
+.tabs2 button{border:0;background:transparent;padding:.55rem;border-radius:999px;font-weight:700;color:var(--mut)}
+.tabs2 button.on{background:linear-gradient(135deg,var(--a),var(--b));color:#fff}
+.authcard form{display:flex;flex-direction:column;gap:.7rem}
+.authcard input{padding:.75rem .9rem;border-radius:.9rem;background:#0c0b20;color:#fff;border:1px solid #4a4580;width:100%}
+.autherr{color:#fca5a5;min-height:1.2em;font-size:.88rem}
+/* QR on the home page */
+.phonebox{width:100%;display:flex;gap:1.2rem;align-items:center;flex-wrap:wrap;justify-content:center;padding:1.1rem;border-radius:1.6rem;border:1px solid var(--line);background:var(--glass);backdrop-filter:blur(16px)}
+.phonebox canvas{background:#fff;border-radius:1rem;padding:.5rem;width:160px;height:160px;box-shadow:0 0 40px rgba(34,211,238,.3)}
+.pb-text{flex:1 1 15rem;display:flex;flex-direction:column;gap:.5rem}
 </style>
 </head>
 <body>
@@ -289,6 +524,7 @@ html[data-contrast="1"] .sub-tr{color:#fff;background:none}
 <header>
   <span class="logo">orvex</span>
   <div class="tools">
+    <button id="user-btn" class="ib" hidden title="Account">👤 <span id="user-name"></span></button>
     <button id="install-btn" class="ib" hidden title="Install ORVEX as an app">⬇ <span>Install</span></button>
     <button id="pal-btn" class="ib" title="Command palette (Ctrl+K)" aria-label="Command palette">⌘ <span class="kbd">Ctrl K</span></button>
     <button id="help-btn" class="ib" title="How to use ORVEX" aria-label="Help">❓ <span>Help</span></button>
@@ -306,9 +542,10 @@ html[data-contrast="1"] .sub-tr{color:#fff;background:none}
   <label class="row"><input type="checkbox" id="opt-speak" checked> Speak responses aloud</label>
   <label class="row"><input type="checkbox" id="opt-contrast"> High contrast</label>
   <label class="row"><input type="checkbox" id="opt-auto"> Speak translations automatically</label>
+  <label class="row"><input type="checkbox" id="opt-wake" checked> Wake word: say “Orvex” first</label>
   <div id="key-box" class="keybox" hidden>
-    <span class="note">Optional: Claude API key to unlock ✨ Explain, Simplify and Replies. Kept in memory only, never saved to disk.</span>
-    <div class="row"><input id="key-in" type="password" placeholder="sk-ant-…" autocomplete="off" aria-label="Claude API key"><button id="key-save" class="mini" type="button">Save</button></div>
+    <span class="note">Optional: free Gemini API key (aistudio.google.com/apikey) to unlock ✨ Explain, Simplify and Replies. Kept in memory only. To keep it permanently, put GEMINI_API_KEY=... in a .env file next to orvex.py.</span>
+    <div class="row"><input id="key-in" type="password" placeholder="AIza…" autocomplete="off" aria-label="Gemini API key"><button id="key-save" class="mini" type="button">Save</button></div>
   </div>
   <span id="ai-chip" class="note"></span>
   <label>Speech speed <input type="range" id="opt-rate" min="0.6" max="1.6" step="0.1" value="1"></label>
@@ -327,6 +564,22 @@ html[data-contrast="1"] .sub-tr{color:#fff;background:none}
       <option value="rus+eng">Russian + English</option><option value="jpn+eng">Japanese + English</option><option value="chi_sim+eng">Chinese + English</option>
     </select>
   </label>
+</div>
+
+<!-- Sign in / Sign up -->
+<div id="auth" class="authwrap" role="dialog" aria-modal="true" aria-label="Sign in">
+  <div class="authcard">
+    <span class="logo">orvex</span>
+    <p class="note" style="text-align:center">Sign in to use ORVEX. New here? Create a free account.</p>
+    <div class="tabs2"><button id="tab-in" type="button" class="on">Sign in</button><button id="tab-up" type="button">Create account</button></div>
+    <form id="auth-form" autocomplete="on">
+      <input id="au-name" type="text" placeholder="Your name" maxlength="60" autocomplete="name" hidden>
+      <input id="au-email" type="email" placeholder="Email" maxlength="120" autocomplete="email" required>
+      <input id="au-pass" type="password" placeholder="Password (8+ characters)" maxlength="200" autocomplete="current-password" required>
+      <p id="auth-err" class="autherr" role="alert"></p>
+      <button id="au-go" class="pill go big" type="submit">Sign in</button>
+    </form>
+  </div>
 </div>
 
 <div id="backdrop" class="backdrop" hidden></div>
@@ -359,7 +612,8 @@ html[data-contrast="1"] .sub-tr{color:#fff;background:none}
 <section id="p-live" class="panel" hidden>
   <div class="panel-head"><h2>Live audio translation</h2><button class="x" data-close aria-label="Close">×</button></div>
   <ol class="steps"><li>Open the video or meeting in another browser tab</li><li>Press Start, choose that tab, tick <b>Also share tab audio</b></li><li>Words and their translation appear below</li></ol>
-  <p class="note"><b>Privacy:</b> audio is turned into text on this computer and thrown away. It is never saved. Only the recognised <i>text</i> goes to Google Translate. Delay is roughly 8–15 seconds. Works in Chrome or Edge on a computer.</p>
+  <p class="note"><b>Privacy:</b> audio is turned into text on this computer and thrown away. It is never saved. Only the recognised <i>text</i> goes to the free translation service. Delay is usually a few seconds up to about 10 seconds. Works in Chrome or Edge on a computer.</p>
+  <p class="note"><b>Sound from any app</b> (video player, game, call): press Start, choose <b>Entire screen</b> and tick <b>Share system audio</b> (Windows, Chrome or Edge). A single window never includes sound. Nothing is captured until you press Start.</p>
   <div class="row">
     <label class="opt">Spoken language <select id="live-src"></select></label>
     <label class="opt">Translate to <select id="live-target" class="tgt"></select></label>
@@ -371,6 +625,10 @@ html[data-contrast="1"] .sub-tr{color:#fff;background:none}
     <button id="live-resume" class="pill" type="button" hidden>▶ Resume</button>
     <button id="live-stop" class="pill" type="button" hidden>■ Stop</button>
     <button id="live-clear" class="pill" type="button">Clear</button>
+  </div>
+  <div class="row">
+    <button id="live-ovl" class="pill" type="button">🪟 Show floating window</button>
+    <span id="live-ovl-note" class="note"></span>
   </div>
   <div class="lvl" title="Live audio level"><i id="lvl"></i></div>
   <p id="live-status" class="note"></p>
@@ -400,7 +658,7 @@ html[data-contrast="1"] .sub-tr{color:#fff;background:none}
   <p class="sub">Understand any language in three easy steps.</p>
   <ol class="steps big">
     <li><b>Tap a card.</b> Read a screen or photo, translate live audio, or type words in the box.</li>
-    <li><b>Or just say it.</b> Press the microphone and say “Read my screen”.</li>
+    <li><b>Or just say it.</b> Press the microphone and say “Orvex, read my screen”.</li>
     <li><b>Hear the answer.</b> I read translations aloud. The <b>Aa</b> button makes everything bigger.</li>
   </ol>
   <button id="welcome-go" class="pill go big" type="button">Let's start</button>
@@ -491,7 +749,7 @@ html[data-contrast="1"] .sub-tr{color:#fff;background:none}
       </div></div>
     </div>
     <h1>Any language.<br>Instantly understood.</h1>
-    <p class="sub">Point me at a screen, a photo or a video and I'll read it, name the language and translate it. Tap a card or just say what you need.</p>
+    <p class="sub">Point me at a screen, a photo or a video and I'll read it, name the language and translate it. Tap a card or just say “Orvex” and what you need.</p>
     <p id="caption">Hi, I'm ORVEX!</p>
     <button id="stop-speak" class="pill" hidden>■ Stop speaking</button>
     <p id="heard" class="heard"></p>
@@ -556,10 +814,19 @@ html[data-contrast="1"] .sub-tr{color:#fff;background:none}
     <button id="b-saved" class="pill" type="button">⭐ Saved &amp; history</button>
     <button id="b-lab" class="pill" type="button">📊 Language Lab (test results)</button>
   </div>
+  <section class="phonebox" id="phonebox">
+    <canvas id="qr-home" width="160" height="160" aria-label="QR code to open ORVEX on your phone"></canvas>
+    <div class="pb-text">
+      <span class="qlabel">Open on your phone</span>
+      <p class="note">Scan this code with your phone camera (phone and computer on the same Wi-Fi), then sign in with the same account.</p>
+      <p class="urlbox" id="qr-home-url">…</p>
+      <div class="row"><button id="qr-home-copy" class="pill" type="button">Copy link</button><button id="qr-home-big" class="pill" type="button">Bigger code</button></div>
+    </div>
+  </section>
   <div id="chips" class="chips"></div>
   <section class="hood">
     <span class="qlabel">Under the hood</span>
-    <div class="chips2"><span><b>Whisper</b> speech to text</span><span><b>Tesseract</b> reads images</span><span><b>langdetect</b> names the language</span><span><b>Google Translate</b> text only</span><span><b>Claude</b> explain (optional)</span></div>
+    <div class="chips2"><span><b>Whisper</b> speech to text</span><span><b>Tesseract</b> reads images</span><span><b>langdetect</b> names the language</span><span><b>Google Translate</b> text only</span><span><b>Gemini</b> explain (optional)</span></div>
     <p class="note" style="text-align:center">Screens, photos and camera frames stay in your browser. Only text is ever sent anywhere.</p>
   </section>
 </main>
@@ -569,7 +836,7 @@ html[data-contrast="1"] .sub-tr{color:#fff;background:none}
     <button type="button" id="mic" class="mic" title="Speak a command" aria-label="Microphone">
       <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
     </button>
-    <input id="input" type="text" placeholder="Type or say a command…" maxlength="1000" required>
+    <input id="input" type="text" placeholder="Type or say “Orvex …”" maxlength="1000" required>
     <button type="submit" class="send" title="Send" aria-label="Send">➤</button>
   </form>
 </div>
@@ -577,11 +844,61 @@ html[data-contrast="1"] .sub-tr{color:#fff;background:none}
 
 <script>
 const $ = (id) => document.getElementById(id);
-const LANGS = [["en","English"],["hi","Hindi"],["te","Telugu"],["ta","Tamil"],["bn","Bengali"],["mr","Marathi"],["ur","Urdu"],["es","Spanish"],["fr","French"],["de","German"],["it","Italian"],["pt","Portuguese"],["ru","Russian"],["ja","Japanese"],["ko","Korean"],["zh-CN","Chinese"],["ar","Arabic"],["id","Indonesian"],["tr","Turkish"],["vi","Vietnamese"],["sw","Swahili"]];
+const LANGS = [["en","English"],["hi","Hindi"],["te","Telugu"],["ta","Tamil"],["bn","Bengali"],["mr","Marathi"],["ur","Urdu"],["es","Spanish"],["fr","French"],["de","German"],["it","Italian"],["pt","Portuguese"],["ru","Russian"],["ja","Japanese"],["ko","Korean"],["zh-CN","Chinese"],["ar","Arabic"],["id","Indonesian"],["tr","Turkish"],["vi","Vietnamese"],["sw","Swahili"],["gu","Gujarati"],["pa","Punjabi"],["kn","Kannada"],["ml","Malayalam"],["nl","Dutch"],["pl","Polish"],["sv","Swedish"],["th","Thai"],["ms","Malay"],["ne","Nepali"],["el","Greek"],["he","Hebrew"],["uk","Ukrainian"]];
 const store = { get(k, d) { try { return localStorage.getItem(k) ?? d; } catch (e) { return d; } }, set(k, v) { try { localStorage.setItem(k, v); } catch (e) {} } };
 document.querySelectorAll(".tgt").forEach((s) => LANGS.forEach(([c, n]) => s.add(new Option(n, c))));
 const savedTarget = store.get("orvex-target", "en");
-document.querySelectorAll(".tgt").forEach((s) => { s.value = savedTarget; s.addEventListener("change", () => store.set("orvex-target", s.value)); });
+document.querySelectorAll(".tgt").forEach((s) => { s.value = savedTarget; s.addEventListener("change", () => { store.set("orvex-target", s.value); document.querySelectorAll(".tgt").forEach((o) => { o.value = s.value; }); }); });   // one preferred language for every translation box, remembered next time
+
+// ---------- Sign in / Sign up ----------
+const _fetch = window.fetch.bind(window);
+window.fetch = async (...a) => {   // any "please sign in" answer from the server brings the sign-in screen back
+  const r = await _fetch(...a);
+  const u = String(a[0] && a[0].url ? a[0].url : a[0]);
+  if (r.status === 401 && !/\/api\/(login|signup)/.test(u)) showAuth();
+  return r;
+};
+let me = null, authMode = "in";
+function setAuthMode(m) {
+  authMode = m;
+  $("tab-in").classList.toggle("on", m === "in"); $("tab-up").classList.toggle("on", m === "up");
+  $("au-name").hidden = m !== "up"; $("au-name").required = m === "up";
+  $("au-pass").autocomplete = m === "up" ? "new-password" : "current-password";
+  $("au-go").textContent = m === "up" ? "Create account" : "Sign in";
+  $("auth-err").textContent = "";
+}
+function showAuth() {
+  me = null; $("auth").hidden = false; $("user-btn").hidden = true;
+  try { stopListening(); closePanels(); } catch (e) {}
+}
+function onUser(u) {
+  me = u; $("auth").hidden = true; $("user-btn").hidden = false;
+  $("user-name").textContent = (u.name || "Account").split(" ")[0];
+  $("user-btn").title = "Signed in as " + u.email + ". Click to sign out.";
+  tryAutoWake();
+}
+$("tab-in").addEventListener("click", () => setAuthMode("in"));
+$("tab-up").addEventListener("click", () => setAuthMode("up"));
+$("auth-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const up = authMode === "up", err = $("auth-err"); err.textContent = "";
+  const body = { email: $("au-email").value, password: $("au-pass").value };
+  if (up) body.name = $("au-name").value;
+  $("au-go").disabled = true;
+  try {
+    const r = await fetch(up ? "/api/signup" : "/api/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || "Something went wrong");
+    $("au-pass").value = ""; onUser(d.user);
+  } catch (x) { err.textContent = x.message; }
+  finally { $("au-go").disabled = false; }
+});
+$("user-btn").addEventListener("click", async () => {
+  if (!confirm("Sign out of ORVEX?")) return;
+  try { await _fetch("/api/logout", { method: "POST" }); } catch (e) {}
+  showAuth();
+});
+_fetch("/api/me").then((r) => r.json()).then((d) => { if (d.user) onUser(d.user); else showAuth(); }).catch(() => {});
 
 // ---------- Robot (orb) ----------
 const Robot = (() => {
@@ -707,35 +1024,71 @@ form.addEventListener("submit", (e) => { e.preventDefault(); sendMessage(input.v
   $("chips").appendChild(b);
 });
 
-// ---------- Voice recognition ----------
+// ---------- Voice recognition + wake word "Orvex" ----------
 const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
 const mic = $("mic");
 let recognition = null, wantListening = false;
 function stopListening() { wantListening = false; mic.classList.remove("active"); if (recognition) { try { recognition.stop(); } catch (e) {} } }
+
+const WAKE_RE = /\b(?:hey\s+|ok\s+|okay\s+)?(?:orvex|or\s?vex|orvax|orbex|orwex|ervex|orvecs|or\s?vecs)\b/i;   // add more spellings here if the browser mishears the name
+let armedUntil = 0, lastWakeAt = 0, lastHandled = "", lastHandledAt = 0, restartDelay = 300, recStartedAt = 0;
+function beep() {
+  try {
+    const c = new (window.AudioContext || window.webkitAudioContext)(), o = c.createOscillator(), g = c.createGain();
+    o.frequency.value = 880; g.gain.value = 0.08; o.connect(g); g.connect(c.destination); o.start();
+    setTimeout(() => { o.stop(); c.close(); }, 130);
+  } catch (e) {}
+}
+function armWake() {   // wakes ORVEX for 8 seconds. The 1.5 second cooldown means one spoken "Orvex" can never trigger two wake-ups.
+  const now = Date.now();
+  if (now - lastWakeAt < 1500) return;
+  lastWakeAt = now; armedUntil = now + 8000; beep();
+  heard.textContent = "I'm listening… say your command."; Robot.setMood("listening", "Yes? Say your command…");
+}
+function handleVoice(t) {
+  const now = Date.now(), norm = t.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, " ").replace(/\s+/g, " ").trim();
+  if (!norm || (norm === lastHandled && now - lastHandledAt < 3000)) return;   // the browser sometimes repeats a sentence after it restarts
+  lastHandled = norm; lastHandledAt = now;
+  if (!$("opt-wake").checked) { sendMessage(t); return; }
+  const m = t.match(WAKE_RE);
+  if (m) {
+    const rest = t.slice(m.index + m[0].length).replace(/^[\s,.:;!?-]+/, "").trim();
+    if (rest) { armedUntil = 0; sendMessage(rest); }
+    else armWake();
+  } else if (now < armedUntil) { armedUntil = 0; sendMessage(t); }
+  else heard.textContent = "Say “Orvex” first, then your command.";
+}
 function startListening() {
   recognition = new SpeechRec();
   recognition.lang = $("opt-lang").value;
   recognition.continuous = true; recognition.interimResults = true;
-  recognition.onstart = () => { mic.classList.add("active"); Robot.setMood("listening", "Listening… say a command"); };
+  recognition.onstart = () => { recStartedAt = Date.now(); mic.classList.add("active"); Robot.setMood("listening", $("opt-wake").checked ? "Say “Orvex”, then your command" : "Listening… say a command"); };
   recognition.onresult = (e) => {
     if ("speechSynthesis" in window && speechSynthesis.speaking) return;
     let interim = "";
     for (let i = e.resultIndex; i < e.results.length; i++) {
       const t = e.results[i][0].transcript;
-      if (e.results[i].isFinal) { sendMessage(t); interim = ""; } else interim += t;
+      if (e.results[i].isFinal) { handleVoice(t); interim = ""; } else interim += t;
     }
-    if (interim) heard.textContent = "Hearing: “" + interim + "”";
+    if (interim) {
+      heard.textContent = "Hearing: “" + interim + "”";
+      if ($("opt-wake").checked && Date.now() >= armedUntil && WAKE_RE.test(interim)) armWake();   // react the moment "Orvex" is heard, before the sentence ends
+    }
   };
   recognition.onerror = (e) => {
     if (e.error === "no-speech" || e.error === "aborted") return;
     wantListening = false; mic.classList.remove("active");
     let msg = "Microphone error: " + e.error + ".";
     if (e.error === "not-allowed" || e.error === "service-not-allowed") msg = "Microphone access was blocked. Allow it in the browser's address bar and try again.";
+    if (e.error === "audio-capture") msg = "No microphone was found. Plug one in or check your Windows sound settings, then press the mic again.";
     if (e.error === "network") msg = "Speech recognition needs an internet connection.";
     addMessage(msg, "bot"); Robot.setMood("idle", "Ready when you are.");
   };
   recognition.onend = () => {
-    if (wantListening) { setTimeout(() => { if (wantListening) { try { recognition.start(); } catch (e) {} } }, 300); }
+    if (wantListening) {
+      restartDelay = (Date.now() - recStartedAt < 1500) ? Math.min(restartDelay * 2, 5000) : 300;   // back off if it keeps ending at once, so it never spins the CPU
+      setTimeout(() => { if (wantListening) { try { recognition.start(); } catch (e) {} } }, restartDelay);
+    }
     else { mic.classList.remove("active"); Robot.setMood("idle", "Ready when you are."); }
   };
   recognition.start();
@@ -745,6 +1098,28 @@ mic.addEventListener("click", () => {
   if (wantListening) { stopListening(); return; }
   wantListening = true; startListening();
 });
+
+// ---------- Wake word switch + QR on the home page ----------
+$("opt-wake").checked = store.get("orvex-wake", "1") === "1";
+$("opt-wake").addEventListener("change", (e) => {
+  store.set("orvex-wake", e.target.checked ? "1" : "0");
+  if (!SpeechRec) return;
+  if (e.target.checked) { if (!wantListening) { wantListening = true; startListening(); } } else stopListening();
+});
+async function tryAutoWake() {   // starts the wake-word listener on its own only if the mic was already allowed before
+  if (!SpeechRec || wantListening || !$("opt-wake").checked) return;
+  try { const p = await navigator.permissions.query({ name: "microphone" }); if (p.state === "granted") { wantListening = true; startListening(); } } catch (e) {}
+}
+async function homeQR() {
+  let url = location.href.split("#")[0];
+  try { const d = await (await _fetch("/api/lan-url")).json(); if (d.url) url = d.url; } catch (e) {}
+  $("qr-home-url").textContent = url;
+  if (window.QRCode && QRCode.toCanvas) QRCode.toCanvas($("qr-home"), url, { width: 160, margin: 1, color: { dark: "#0b0a1f", light: "#ffffff" } }, () => {});
+  else $("phonebox").hidden = true;
+}
+$("qr-home-copy").addEventListener("click", () => copyText($("qr-home-url").textContent));
+$("qr-home-big").addEventListener("click", () => openPhone());
+homeQR();
 
 // ---------- Screen / photo reader (grab ONE frame or a photo -> OCR in the browser) ----------
 const scrStatus = $("scr-status"), shareBtn = $("scr-share"), readBtn = $("scr-read"), shareBar = $("share-bar");
@@ -884,7 +1259,7 @@ $("tr-btn").addEventListener("click", async () => {
 $("tr-speak").addEventListener("click", () => speak(lastTranslation, lastTarget, true));
 
 // ---------- helpers ----------
-const BCP = { en: "en-US", hi: "hi-IN", te: "te-IN", ta: "ta-IN", bn: "bn-IN", mr: "mr-IN", ur: "ur-PK", es: "es-ES", fr: "fr-FR", de: "de-DE", it: "it-IT", pt: "pt-BR", ru: "ru-RU", ja: "ja-JP", ko: "ko-KR", "zh-CN": "zh-CN", ar: "ar-SA", id: "id-ID", tr: "tr-TR", vi: "vi-VN", sw: "sw-KE" };
+const BCP = { en: "en-US", hi: "hi-IN", te: "te-IN", ta: "ta-IN", bn: "bn-IN", mr: "mr-IN", ur: "ur-PK", es: "es-ES", fr: "fr-FR", de: "de-DE", it: "it-IT", pt: "pt-BR", ru: "ru-RU", ja: "ja-JP", ko: "ko-KR", "zh-CN": "zh-CN", ar: "ar-SA", id: "id-ID", tr: "tr-TR", vi: "vi-VN", sw: "sw-KE", gu: "gu-IN", pa: "pa-IN", kn: "kn-IN", ml: "ml-IN", nl: "nl-NL", pl: "pl-PL", sv: "sv-SE", th: "th-TH", ms: "ms-MY", ne: "ne-NP", el: "el-GR", he: "he-IL", uk: "uk-UA" };
 function fillLang(sel, def) { LANGS.forEach(([c, n]) => sel.add(new Option(n, c))); sel.value = def; }
 function langName(c) { const k = LANGS.find((x) => x[0] === c); return k ? k[1] : c; }
 fillLang($("itp-src"), "en"); fillLang($("cv-a"), "en"); fillLang($("cv-b"), "hi");
@@ -1004,7 +1379,7 @@ async function loadConfig() {
   try {
     const d = await (await fetch("/api/config")).json();
     aiOn = !!d.ai; $("key-box").hidden = !d.can_set_key;
-    $("ai-chip").textContent = d.ai ? "✨ AI explain is ON" : "✨ AI explain is off (optional: add a Claude API key)";
+    $("ai-chip").textContent = d.ai ? "✨ AI explain is ON" : "✨ AI explain is off (optional: add a free Gemini API key)";
   } catch (e) {}
 }
 $("key-save").addEventListener("click", async () => {
@@ -1254,19 +1629,46 @@ $("c-screen").addEventListener("click", openScreen);
 $("c-phone").addEventListener("click", openPhone);
 $("c-live").addEventListener("click", openLive);
 
-// ---------- Live computer audio (shared tab audio -> local Whisper -> translation) ----------
+// ---------- Live computer audio (shared tab / system audio -> local Whisper -> translation) ----------
 (function () {
   const src = $("live-src");
   src.add(new Option("Auto-detect", ""));
   LANGS.forEach(([c, n]) => src.add(new Option(n, c.split("-")[0])));
 })();
 const live = { state: "off" };
-const SEG_MS = 6000, SILENCE = 0.005;
+const SEG_MS = 4500, SILENCE = 0.005;   // shorter chunks = faster text (was 6000)
 const lMime = (window.MediaRecorder && MediaRecorder.isTypeSupported("audio/webm;codecs=opus")) ? "audio/webm;codecs=opus" : "";
 let lStream = null, lAudio = null, lTrack = null, lCtx = null, lMeter = null, curRec = null, segTimer = null;
 let segPeak = 0, ttsHit = false, lq = Promise.resolve(), lPending = 0, spokenQ = 0, warmP = null;
 const setLive = (t) => { $("live-status").textContent = t; };
 const listenMsg = (extra) => live.state === "paused" ? "Paused. ORVEX isn't recording anything." : "Listening… " + extra;
+
+// floating translation window (a small always-on-top desktop window started by the ORVEX server on this computer)
+let ovlOn = false;
+function ovlUI() { $("live-ovl").textContent = ovlOn ? "🪟 Close floating window" : "🪟 Show floating window"; }
+async function ovlCall(path, body) {
+  const r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.error || "Request failed");
+  return d;
+}
+function ovlPush(original, translation, language) {
+  if (!ovlOn) return;
+  ovlCall("/api/overlay/push", { original, translation, language }).then((d) => { if (!d.running) { ovlOn = false; ovlUI(); } }).catch(() => {});
+}
+$("live-ovl").addEventListener("click", async () => {
+  const n = $("live-ovl-note"); n.textContent = ""; $("live-ovl").disabled = true;
+  try { const d = await ovlCall(ovlOn ? "/api/overlay/stop" : "/api/overlay/start"); ovlOn = !!d.running; }
+  catch (e) { n.textContent = "⚠ " + e.message; }
+  finally { $("live-ovl").disabled = false; ovlUI(); }
+});
+function ovlRefresh() {
+  fetch("/api/overlay/status").then((r) => r.json()).then((d) => {
+    ovlOn = !!d.running; ovlUI();
+    $("live-ovl-note").textContent = d.local === false ? "Open ORVEX at http://127.0.0.1:5000 on this computer to use the floating window." : (d.available === false ? "The floating window needs Python's built-in tkinter." : "");
+  }).catch(() => {});
+}
+
 function warm() {
   if (!warmP) warmP = fetch("/api/stt-warmup", { method: "POST" })
     .then(async (r) => { const d = await r.json(); if (!r.ok) throw new Error(d.error || "Speech model failed to load"); return d; })
@@ -1277,10 +1679,11 @@ function liveUI() {
   const s = live.state;
   $("live-start").hidden = s !== "off"; $("live-pause").hidden = s !== "running"; $("live-resume").hidden = s !== "paused";
   $("live-stop").hidden = s === "off"; $("live-bar").hidden = s === "off";
-  $("live-bar-text").textContent = s === "paused" ? "Live audio paused" : s === "loading" ? "Preparing…" : "Listening to tab audio";
+  $("live-bar-text").textContent = s === "paused" ? "Live audio paused" : s === "loading" ? "Preparing…" : "Listening to shared audio";
 }
 function openLive() {
   openPanel("live");
+  ovlRefresh();
   if (live.state !== "off") return;
   if (!(CAN_SHARE && window.MediaRecorder)) { setLive("This device can't capture tab audio. Please use Chrome or Edge on a computer."); return; }
   setLive("Preparing the speech model (a one-time download the first time)…");
@@ -1292,7 +1695,7 @@ $("live-pause").addEventListener("click", pauseLive);
 $("live-resume").addEventListener("click", resumeLive);
 $("live-stop").addEventListener("click", () => stopLive());
 $("live-bar-stop").addEventListener("click", () => stopLive());
-$("live-clear").addEventListener("click", () => { document.querySelectorAll("#live-grid .lrow").forEach((r) => r.remove()); });
+$("live-clear").addEventListener("click", () => { document.querySelectorAll("#live-grid .lrow").forEach((r) => r.remove()); if (ovlOn) ovlCall("/api/overlay/push", { clear: true }).catch(() => {}); });
 
 async function startLive() {
   if (live.state !== "off") return;
@@ -1301,7 +1704,7 @@ async function startLive() {
   lCtx = new (window.AudioContext || window.webkitAudioContext)();
   lCtx.resume().catch(() => {});
   let s;
-  try { s = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true, selfBrowserSurface: "exclude", systemAudio: "exclude" }); }
+  try { s = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true, selfBrowserSurface: "exclude", systemAudio: "include" }); }
   catch (e) {
     lCtx.close().catch(() => {}); lCtx = null;
     setLive(e.name === "NotAllowedError" ? "You didn't share anything, so I'm not listening to anything." : "Couldn't start sharing: " + e.message);
@@ -1311,13 +1714,13 @@ async function startLive() {
   s.getVideoTracks().forEach((t) => t.stop());   // we only want the sound, never the picture
   if (!at) {
     s.getTracks().forEach((t) => t.stop()); lCtx.close().catch(() => {}); lCtx = null;
-    setLive("No audio was shared. Try again, choose a Chrome/Edge tab, and tick “Also share tab audio”. Windows and screens don't include audio here.");
-    speak("I didn't receive any audio. Choose a browser tab and tick Also share tab audio.");
+    setLive("No audio was shared. Try again: choose a Chrome/Edge tab and tick “Also share tab audio”, or choose Entire screen and tick “Share system audio” (Windows). A single window never includes audio.");
+    speak("I didn't receive any audio. Choose a browser tab and tick Also share tab audio, or choose Entire screen and tick Share system audio.");
     return;
   }
   lStream = s; lTrack = at; lAudio = new MediaStream([at]);
   live.state = "loading"; liveUI();
-  at.addEventListener("ended", () => { if (live.state !== "off") stopLive("The shared tab or its audio ended, so I stopped listening."); });
+  at.addEventListener("ended", () => { if (live.state !== "off") stopLive("The shared screen or its audio ended, so I stopped listening."); });
   Robot.setMood("thinking", "Preparing…");
   setLive("Audio is shared. Loading the speech model… (the first time it is a one-time download)");
   try { await warm(); } catch (e) { stopLive("⚠ " + e.message); return; }
@@ -1335,7 +1738,7 @@ async function startLive() {
     $("lvl").style.width = Math.min(100, rms * 600) + "%"; Halo.setLevel(live.state === "running" ? rms * 8 : 0);
   }, 150);
   live.state = "running"; liveUI();
-  setLive("Listening to the shared tab… text appears every few seconds.");
+  setLive("Listening to the shared audio… text appears every few seconds.");
   Robot.setMood("listening", "Listening to computer audio…");
   startSegment();
 }
@@ -1360,7 +1763,7 @@ function startSegment() {
   segTimer = setTimeout(() => { if (rec.state === "recording") rec.stop(); }, SEG_MS);
 }
 function enqueue(blob) {
-  if (lPending >= 3) { setLive("Falling behind: skipped a chunk. Try the smaller 'tiny' model or a different tab."); return; }
+  if (lPending >= 3) { setLive("Falling behind: skipped a chunk. Try the smaller 'tiny' model (ORVEX_WHISPER_MODEL=tiny in .env) or a different tab."); return; }
   lPending++;
   lq = lq.then(() => processBlob(blob)).catch(() => {}).then(() => { lPending--; });
 }
@@ -1383,10 +1786,10 @@ async function processBlob(blob) {
     const grid = $("live-grid"); grid.appendChild(row);
     const rows = grid.querySelectorAll(".lrow"); if (rows.length > 200) rows[0].remove();
     grid.scrollTop = grid.scrollHeight;
-    if (d.language.split("-")[0] === target.split("-")[0]) { b.textContent = "(already in this language)"; }
+    if (d.language.split("-")[0] === target.split("-")[0]) { b.textContent = "(already in this language)"; ovlPush(d.text, d.text, d.language_name); }
     else {
       b.textContent = "…";
-      try { b.textContent = await translateText(d.text, target); if ($("live-say").checked) speakLive(b.textContent, target); }
+      try { b.textContent = await translateText(d.text, target); ovlPush(d.text, b.textContent, d.language_name); if ($("live-say").checked) speakLive(b.textContent, target); }
       catch (e) { b.textContent = "⚠ " + e.message; }
     }
     grid.scrollTop = grid.scrollHeight;
@@ -1415,7 +1818,7 @@ function pauseLive() {
 function resumeLive() {
   if (live.state !== "paused") return false;
   if (lTrack) lTrack.enabled = true;
-  live.state = "running"; liveUI(); setLive("Listening to the shared tab…");
+  live.state = "running"; liveUI(); setLive("Listening to the shared audio…");
   Robot.setMood("listening", "Listening to computer audio…"); startSegment(); return true;
 }
 function stopLive(msg) {
@@ -1501,7 +1904,7 @@ async function checkServer() {
 checkServer(); setInterval(checkServer, 15000);
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
 
-addMessage("Hello! I'm ORVEX. Tap a card, press the mic, or type what you need.", "bot");
+addMessage("Hello! I'm ORVEX. Tap a card, press the mic and say “Orvex …”, or type what you need.", "bot");
 Robot.setMood("happy", "Hi, I'm ORVEX!", 3000);
 </script>
 </body>
@@ -1640,13 +2043,16 @@ LANG_NAMES = {
     "zh-tw": "Chinese (Traditional)", "ar": "Arabic", "bn": "Bengali", "ta": "Tamil", "te": "Telugu",
     "mr": "Marathi", "gu": "Gujarati", "pa": "Punjabi", "ur": "Urdu", "nl": "Dutch", "tr": "Turkish",
     "ne": "Nepali", "id": "Indonesian", "pl": "Polish", "sv": "Swedish", "vi": "Vietnamese", "th": "Thai",
-    "sw": "Swahili", "ms": "Malay", "kn": "Kannada", "ml": "Malayalam",
+    "sw": "Swahili", "ms": "Malay", "kn": "Kannada", "ml": "Malayalam", "el": "Greek", "he": "Hebrew", "uk": "Ukrainian",
 }
-TRANSLATE_TARGETS = {"en", "hi", "te", "ta", "bn", "mr", "ur", "es", "fr", "de", "it", "pt", "ru", "ja", "ko", "zh-CN", "ar", "id", "tr", "vi", "sw"}
-WHISPER_LANGS = {"en", "hi", "te", "ta", "bn", "mr", "ur", "es", "fr", "de", "it", "pt", "ru", "ja", "ko", "zh", "ar", "id", "tr", "vi", "sw"}
+TRANSLATE_TARGETS = {"en", "hi", "te", "ta", "bn", "mr", "ur", "es", "fr", "de", "it", "pt", "ru", "ja", "ko", "zh-CN", "ar", "id", "tr", "vi", "sw",
+                     "gu", "pa", "kn", "ml", "nl", "pl", "sv", "th", "ms", "ne", "el", "he", "uk"}
+WHISPER_LANGS = {"en", "hi", "te", "ta", "bn", "mr", "ur", "es", "fr", "de", "it", "pt", "ru", "ja", "ko", "zh", "ar", "id", "tr", "vi", "sw",
+                 "gu", "pa", "kn", "ml", "nl", "pl", "sv", "th", "ms", "ne", "el", "he", "uk"}
 
 # Speech recognition runs LOCALLY (faster-whisper): no API key, no audio upload to any service.
 # Model sizes: tiny (fastest), base (default), small (more accurate, needs a stronger computer).
+# Change it with ORVEX_WHISPER_MODEL in your .env file.
 WHISPER_MODEL = os.environ.get("ORVEX_WHISPER_MODEL", "base")
 _whisper = None
 _load_lock = threading.Lock()
@@ -1681,7 +2087,7 @@ def generate_reply(text):
     if "how are you" in t:
         return "I'm running smoothly and feeling bright. Thanks for asking!", "happy"
     if "help" in words:
-        return "Tap a card, or say things like Read my screen, Translate text, Listen to my computer audio, or Bigger text.", "thinking"
+        return "Tap a card, or say things like Orvex read my screen, Orvex translate text, Orvex listen to my computer audio, or Orvex bigger text.", "thinking"
     if any(w in words for w in ("thanks", "thank")):
         return "You're welcome!", "happy"
     return 'You said: "' + text + '". Try Read my screen, Translate text, or Listen to my computer audio.', "talking"
@@ -1767,9 +2173,101 @@ def detect_language():
                    confidence=round(top.prob, 3), alternatives=alternatives)
 
 
+# ---------------------------------------------------------------------------
+# Translation: Google Translate first (free, no key, through deep-translator).
+# If Google fails or is rate-limited, ORVEX switches to MyMemory (free, no key; an optional
+# MYMEMORY_EMAIL in .env raises its daily limit) and skips Google for 30 seconds.
+# Recent translations are cached so repeated sentences are instant and use no quota.
+# ---------------------------------------------------------------------------
+GOOGLE_CODES = {"he": "iw"}   # Google's older code for Hebrew
+MYMEMORY_EMAIL = os.environ.get("MYMEMORY_EMAIL", "").strip()
+_TR_CACHE = {}
+_google_down_until = 0.0
+
+
+def _chunks(text, n):
+    parts, cur = [], ""
+    for s in re.split(r"(?<=[.!?。！？])\s+", text):
+        while len(s) > n:
+            if cur:
+                parts.append(cur)
+                cur = ""
+            parts.append(s[:n])
+            s = s[n:]
+        if cur and len(cur) + len(s) + 1 > n:
+            parts.append(cur)
+            cur = s
+        else:
+            cur = (cur + " " + s).strip()
+    if cur:
+        parts.append(cur)
+    return parts
+
+
+def _mymemory(text, target):
+    import json
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+    out = []
+    for chunk in _chunks(text, 450 if text.isascii() else 160):
+        params = {"q": chunk, "langpair": "Autodetect|" + target}
+        if MYMEMORY_EMAIL:
+            params["de"] = MYMEMORY_EMAIL
+        req = urllib.request.Request("https://api.mymemory.translated.net/get?" + urllib.parse.urlencode(params),
+                                     headers={"User-Agent": "ORVEX/1.0"})
+        try:
+            with urllib.request.urlopen(req, timeout=12) as r:
+                d = json.load(r)
+        except urllib.error.HTTPError as exc:
+            raise RuntimeError("MyMemory free limit reached" if exc.code == 429 else "MyMemory error " + str(exc.code))
+        except Exception:
+            raise RuntimeError("couldn't reach MyMemory")
+        piece = ((d.get("responseData") or {}).get("translatedText") or "").strip()
+        if str(d.get("responseStatus")) == "429" or "MYMEMORY WARNING" in piece.upper():
+            raise RuntimeError("MyMemory free daily limit reached")
+        if str(d.get("responseStatus")) != "200" or not piece:
+            raise RuntimeError("MyMemory couldn't translate this")
+        out.append(piece)
+    return " ".join(out)
+
+
+def translate_text(text, target):
+    """Returns (translation, engine). Raises RuntimeError with a friendly message if every service fails."""
+    global _google_down_until
+    key = (text, target)
+    if key in _TR_CACHE:
+        return _TR_CACHE[key], "cache"
+    errs = []
+    result, engine = "", ""
+    if time.time() >= _google_down_until:
+        try:
+            from deep_translator import GoogleTranslator
+            result = GoogleTranslator(source="auto", target=GOOGLE_CODES.get(target, target)).translate(text) or ""
+            engine = "google"
+        except ImportError:
+            errs.append("deep-translator isn't installed (pip install deep-translator)")
+        except Exception as exc:
+            _google_down_until = time.time() + 30
+            errs.append("Google: " + str(exc)[:80])
+    else:
+        errs.append("Google is paused for a moment after an error")
+    if not result:
+        try:
+            result, engine = _mymemory(text, target), "mymemory"
+        except RuntimeError as exc:
+            errs.append(str(exc))
+    if not result:
+        raise RuntimeError("Translation failed. It needs an internet connection, and the free services may be at their limit. (" + "; ".join(errs)[:200] + ")")
+    if len(_TR_CACHE) >= 500:
+        _TR_CACHE.pop(next(iter(_TR_CACHE)))
+    _TR_CACHE[key] = result
+    return result, engine
+
+
 @app.post("/api/translate")
 def translate():
-    """Translates TEXT only. Uses Google Translate through the deep-translator package."""
+    """Translates TEXT only. Google Translate through deep-translator, with a free MyMemory fallback."""
     data = request.get_json(silent=True) or {}
     text = (data.get("text") or "").strip()[:4500]
     target = data.get("target") or "en"
@@ -1778,46 +2276,72 @@ def translate():
     if target not in TRANSLATE_TARGETS:
         return jsonify(error="Unsupported target language."), 400
     try:
-        from deep_translator import GoogleTranslator
-    except ImportError:
-        return jsonify(error="Translation needs the 'deep-translator' package. Run: pip install deep-translator"), 501
-    try:
-        result = GoogleTranslator(source="auto", target=target).translate(text)
-    except Exception as exc:
-        return jsonify(error="Translation failed. It needs an internet connection. (" + str(exc)[:120] + ")"), 502
-    return jsonify(translation=result or "")
+        result, engine = translate_text(text, target)
+    except RuntimeError as exc:
+        return jsonify(error=str(exc)), 502
+    return jsonify(translation=result or "", engine=engine)
 
 
 # ---------------------------------------------------------------------------
-# Optional AI helper (Claude). Needs an API key; everything else works without one.
-# Set it with:  set ANTHROPIC_API_KEY=sk-ant-...   (Windows)   or paste it in Settings while running locally.
+# Optional AI helper (Google Gemini, FREE key). Everything else works without one.
+# Get a free key at https://aistudio.google.com/apikey , then do ONE of these:
+#   1) put GEMINI_API_KEY=your-key in a file called .env next to orvex.py  (recommended)
+#   2) save it in a file called gemini_key.txt next to orvex.py
+#   3) set GEMINI_API_KEY (Windows:  set GEMINI_API_KEY=your-key  then  python orvex.py)
+#   4) paste it in Settings while ORVEX runs on this computer (kept in memory only)
+# Never upload your key to GitHub.
 # ---------------------------------------------------------------------------
-AI_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-AI_MODEL = os.environ.get("ORVEX_AI_MODEL", "claude-sonnet-5-5")
+def _load_key():
+    k = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or ""
+    if not k:
+        try:
+            with open(os.path.join(DATA_DIR, "gemini_key.txt"), encoding="utf-8") as f:
+                k = f.read()
+        except OSError:
+            pass
+    return k.strip()
+
+
+AI_KEY = _load_key()
+# Tried in order. If Google retires or rate-limits one model, the next is used automatically.
+AI_MODELS = [m for m in (os.environ.get("ORVEX_AI_MODEL"), "gemini-flash-latest", "gemini-flash-lite-latest", "gemini-2.5-flash-lite") if m]
 
 
 def is_local():
     return request.remote_addr in ("127.0.0.1", "::1") and not request.headers.get("X-Forwarded-For")
 
 
-def ask_claude(system, user):
+def ask_ai(system, user):
     import json
     import urllib.error
     import urllib.request
-    body = json.dumps({"model": AI_MODEL, "max_tokens": 500, "system": system,
-                       "messages": [{"role": "user", "content": user}]}).encode()
-    req = urllib.request.Request("https://api.anthropic.com/v1/messages", data=body, headers={
-        "content-type": "application/json", "x-api-key": AI_KEY, "anthropic-version": "2023-06-01"})
-    try:
-        with urllib.request.urlopen(req, timeout=40) as r:
-            data = json.load(r)
-    except urllib.error.HTTPError as exc:
-        if exc.code == 401:
-            raise RuntimeError("The Claude API key was rejected. Check it in Settings.")
-        raise RuntimeError("The AI service returned an error (" + str(exc.code) + ").")
-    except Exception:
-        raise RuntimeError("Couldn't reach the AI service. It needs an internet connection.")
-    return "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text").strip()
+    body = json.dumps({
+        "systemInstruction": {"parts": [{"text": system}]},
+        "contents": [{"role": "user", "parts": [{"text": user}]}],
+        "generationConfig": {"maxOutputTokens": 2048, "temperature": 0.4},
+    }).encode()
+    last = "The AI service isn't available right now."
+    for model in AI_MODELS:
+        req = urllib.request.Request(
+            "https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent", data=body,
+            headers={"content-type": "application/json", "x-goog-api-key": AI_KEY})
+        try:
+            with urllib.request.urlopen(req, timeout=40) as r:
+                data = json.load(r)
+        except urllib.error.HTTPError as exc:
+            if exc.code in (400, 401, 403):
+                raise RuntimeError("Gemini rejected the request. Check your API key (free at aistudio.google.com/apikey).")
+            last = "Gemini's free limit is reached. Wait a minute and try again." if exc.code == 429 else "Gemini returned an error (" + str(exc.code) + ")."
+            continue
+        except Exception:
+            raise RuntimeError("Couldn't reach the AI service. It needs an internet connection.")
+        cands = data.get("candidates") or []
+        parts = ((cands[0].get("content") or {}).get("parts") or []) if cands else []
+        out = "".join(p.get("text", "") for p in parts).strip()
+        if out:
+            return out
+        last = "Gemini returned no text (it may have blocked the request). Try different wording."
+    raise RuntimeError(last)
 
 
 AI_PROMPTS = {
@@ -1834,13 +2358,13 @@ def config():
 
 @app.post("/api/set-key")
 def set_key():
-    """Lets the person paste a Claude API key in Settings. Only works from the same computer; the key lives in memory only."""
+    """Lets the person paste a Gemini API key in Settings. Only works from the same computer; the key lives in memory only."""
     global AI_KEY
     if not is_local():
-        return jsonify(error="The key can only be set from the computer running ORVEX. Use the ANTHROPIC_API_KEY setting when hosting."), 403
+        return jsonify(error="The key can only be set from the computer running ORVEX. Use the GEMINI_API_KEY setting when hosting."), 403
     key = ((request.get_json(silent=True) or {}).get("key") or "").strip()
-    if not key.startswith("sk-") or len(key) > 300:
-        return jsonify(error="That doesn't look like a Claude API key (it starts with sk-)."), 400
+    if len(key) < 20 or len(key) > 300 or " " in key:
+        return jsonify(error="That doesn't look like a Gemini API key."), 400
     AI_KEY = key
     return jsonify(ai=True)
 
@@ -1848,233 +2372,7 @@ def set_key():
 @app.post("/api/ai")
 def ai_helper():
     if not AI_KEY:
-        return jsonify(error="AI help is off. Add a Claude API key in Settings to unlock Explain, Simplify and Reply ideas."), 501
+        return jsonify(error="AI help is off. Add a free Gemini API key in Settings to unlock Explain, Simplify and Reply ideas."), 501
     data = request.get_json(silent=True) or {}
     mode = data.get("mode")
-    text = (data.get("text") or "").strip()[:2000]
-    lang = (data.get("lang") or "English")[:40]
-    if mode not in AI_PROMPTS or not text:
-        return jsonify(error="Nothing to explain."), 400
-    try:
-        out = ask_claude(AI_PROMPTS[mode].format(lang=lang), "<text>" + text + "</text>")
-    except RuntimeError as exc:
-        return jsonify(error=str(exc)), 502
-    return jsonify(text=out)
-
-
-# ---------------------------------------------------------------------------
-# Language Lab: tests the language detector against labelled sentences.
-# The same 8 sentences were written in 10 languages by the AI assistant that helped build ORVEX
-# (disclose this in your write-up, and add your own native-speaker sentences for a stronger test).
-# ---------------------------------------------------------------------------
-BENCH = {
-    "en": ["The weather is very nice today, so we are going to the park.", "Could you please tell me where the nearest hospital is?",
-           "I have been learning to play the guitar for two years.", "The train to the city leaves at half past seven in the morning.",
-           "My sister loves reading books about space and science.", "We should finish the project before the deadline on Friday.",
-           "Please turn off the lights when you leave the room.", "He forgot his umbrella, and now he is completely wet."],
-    "es": ["Hoy hace muy buen tiempo, así que vamos al parque.", "¿Podría decirme dónde está el hospital más cercano?",
-           "Llevo dos años aprendiendo a tocar la guitarra.", "El tren a la ciudad sale a las siete y media de la mañana.",
-           "A mi hermana le encanta leer libros sobre el espacio y la ciencia.", "Deberíamos terminar el proyecto antes de la fecha límite del viernes.",
-           "Por favor, apaga las luces cuando salgas de la habitación.", "Olvidó su paraguas y ahora está completamente mojado."],
-    "fr": ["Il fait très beau aujourd'hui, alors nous allons au parc.", "Pourriez-vous me dire où se trouve l'hôpital le plus proche ?",
-           "J'apprends à jouer de la guitare depuis deux ans.", "Le train pour la ville part à sept heures et demie du matin.",
-           "Ma sœur adore lire des livres sur l'espace et la science.", "Nous devrions terminer le projet avant la date limite de vendredi.",
-           "Veuillez éteindre les lumières en quittant la pièce.", "Il a oublié son parapluie et maintenant il est complètement trempé."],
-    "de": ["Das Wetter ist heute sehr schön, deshalb gehen wir in den Park.", "Könnten Sie mir bitte sagen, wo das nächste Krankenhaus ist?",
-           "Ich lerne seit zwei Jahren Gitarre spielen.", "Der Zug in die Stadt fährt um halb acht am Morgen ab.",
-           "Meine Schwester liest gerne Bücher über Weltraum und Wissenschaft.", "Wir sollten das Projekt vor der Frist am Freitag abschließen.",
-           "Bitte schalte das Licht aus, wenn du den Raum verlässt.", "Er hat seinen Regenschirm vergessen und ist jetzt völlig nass."],
-    "hi": ["आज मौसम बहुत अच्छा है, इसलिए हम पार्क जा रहे हैं।", "क्या आप मुझे बता सकते हैं कि सबसे नज़दीकी अस्पताल कहाँ है?",
-           "मैं दो साल से गिटार बजाना सीख रहा हूँ।", "शहर जाने वाली ट्रेन सुबह साढ़े सात बजे निकलती है।",
-           "मेरी बहन को अंतरिक्ष और विज्ञान की किताबें पढ़ना पसंद है।", "हमें शुक्रवार की समय सीमा से पहले परियोजना पूरी करनी चाहिए।",
-           "कृपया कमरे से जाते समय बत्तियाँ बंद कर दें।", "वह अपनी छतरी भूल गया और अब पूरी तरह भीग गया है।"],
-    "te": ["ఈ రోజు వాతావరణం చాలా బాగుంది, అందుకే మేము పార్కుకు వెళ్తున్నాము.", "దగ్గరలో ఉన్న ఆసుపత్రి ఎక్కడ ఉందో చెప్పగలరా?",
-           "నేను రెండు సంవత్సరాలుగా గిటార్ వాయించడం నేర్చుకుంటున్నాను.", "నగరానికి వెళ్లే రైలు ఉదయం ఏడున్నరకు బయలుదేరుతుంది.",
-           "నా సోదరికి అంతరిక్షం, సైన్స్ గురించిన పుస్తకాలు చదవడం ఇష్టం.", "శుక్రవారం గడువు లోపల మనం ప్రాజెక్ట్ పూర్తి చేయాలి.",
-           "దయచేసి గది నుండి బయటకు వెళ్ళేటప్పుడు లైట్లు ఆర్పండి.", "అతను తన గొడుగు మర్చిపోయాడు, ఇప్పుడు పూర్తిగా తడిసిపోయాడు."],
-    "ta": ["இன்று வானிலை மிகவும் நன்றாக இருக்கிறது, அதனால் நாங்கள் பூங்காவிற்குப் போகிறோம்.", "அருகிலுள்ள மருத்துவமனை எங்கே இருக்கிறது என்று சொல்ல முடியுமா?",
-           "நான் இரண்டு ஆண்டுகளாக கிட்டார் வாசிக்கக் கற்றுக்கொண்டிருக்கிறேன்.", "நகரத்துக்குச் செல்லும் ரயில் காலை ஏழரை மணிக்குப் புறப்படும்.",
-           "என் தங்கைக்கு விண்வெளி மற்றும் அறிவியல் புத்தகங்கள் படிக்கப் பிடிக்கும்.", "வெள்ளிக்கிழமை கெடுவுக்குள் நாம் திட்டத்தை முடிக்க வேண்டும்.",
-           "அறையை விட்டுச் செல்லும்போது தயவுசெய்து விளக்குகளை அணைக்கவும்.", "அவன் குடையை மறந்துவிட்டான், இப்போது முழுவதும் நனைந்துவிட்டான்."],
-    "ar": ["الطقس جميل جدًا اليوم، لذلك سنذهب إلى الحديقة.", "هل يمكنك أن تخبرني أين يوجد أقرب مستشفى؟",
-           "أتعلم العزف على الغيتار منذ عامين.", "يغادر القطار المتجه إلى المدينة في السابعة والنصف صباحًا.",
-           "تحب أختي قراءة الكتب عن الفضاء والعلوم.", "يجب أن ننهي المشروع قبل الموعد النهائي يوم الجمعة.",
-           "من فضلك أطفئ الأضواء عندما تغادر الغرفة.", "نسي مظلته والآن هو مبلل تمامًا."],
-    "ru": ["Сегодня очень хорошая погода, поэтому мы идём в парк.", "Не могли бы вы сказать, где находится ближайшая больница?",
-           "Я учусь играть на гитаре уже два года.", "Поезд в город отправляется в половине восьмого утра.",
-           "Моя сестра любит читать книги о космосе и науке.", "Нам нужно закончить проект до пятничного срока.",
-           "Пожалуйста, выключайте свет, когда выходите из комнаты.", "Он забыл зонт, и теперь он совершенно мокрый."],
-    "ja": ["今日はとてもいい天気なので、公園に行きます。", "一番近い病院はどこか教えていただけますか？",
-           "私は二年前からギターを習っています。", "街へ行く電車は朝七時半に出発します。",
-           "妹は宇宙や科学の本を読むのが大好きです。", "金曜日の締め切りまでにプロジェクトを終わらせるべきです。",
-           "部屋を出るときは電気を消してください。", "彼は傘を忘れて、今はびしょ濡れです。"],
-}
-
-
-def script_guess(text):
-    """Very simple baseline: look only at which alphabet the letters come from. Any Latin letter counts as English."""
-    counts = {}
-    for ch in text:
-        o = ord(ch)
-        if 0x0900 <= o <= 0x097F:
-            k = "hi"
-        elif 0x0C00 <= o <= 0x0C7F:
-            k = "te"
-        elif 0x0B80 <= o <= 0x0BFF:
-            k = "ta"
-        elif 0x0600 <= o <= 0x06FF:
-            k = "ar"
-        elif 0x0400 <= o <= 0x04FF:
-            k = "ru"
-        elif 0x3040 <= o <= 0x30FF or 0x4E00 <= o <= 0x9FFF:
-            k = "ja"
-        elif ch.isalpha():
-            k = "en"
-        else:
-            continue
-        counts[k] = counts.get(k, 0) + 1
-    return max(counts, key=counts.get) if counts else "en"
-
-
-@app.get("/api/benchmark")
-def benchmark():
-    if not HAVE_LANGDETECT:
-        return jsonify(error="The test needs the 'langdetect' package. Run: python orvex.py --setup"), 501
-    import time
-    per, fails, n, ok_m, ok_s = [], [], 0, 0, 0
-    t0 = time.perf_counter()
-    for code, sents in BENCH.items():
-        m_ok = s_ok = 0
-        for s in sents:
-            try:
-                top = detect_langs(s)[0]
-                pred, conf = top.lang, top.prob
-            except LangDetectException:
-                pred, conf = "?", 0.0
-            m_ok += pred == code
-            s_ok += script_guess(s) == code
-            if pred != code:
-                fails.append({"text": s, "truth": LANG_NAMES.get(code, code), "pred": LANG_NAMES.get(pred, pred), "conf": round(conf, 2)})
-        n += len(sents)
-        ok_m += m_ok
-        ok_s += s_ok
-        per.append({"lang": code, "name": LANG_NAMES.get(code, code), "n": len(sents),
-                    "model": m_ok / len(sents), "script": s_ok / len(sents)})
-    ms = (time.perf_counter() - t0) * 1000 / max(1, n)
-    return jsonify(n=n, model_acc=ok_m / n, script_acc=ok_s / n, majority_acc=1 / len(BENCH), ms_per=ms,
-                   per_lang=per, failures=fails[:12],
-                   note="Test set: the same 8 everyday sentences in 10 languages, written by an AI assistant, so it is small and fairly easy. "
-                        "The detector is a pre-trained model (langdetect), not trained by us. Short or mixed-language text is harder.")
-
-
-@app.post("/api/stt-warmup")
-def stt_warmup():
-    """Loads the speech model (downloads it the first time). Receives no audio."""
-    try:
-        get_whisper()
-    except ImportError:
-        return jsonify(error="Live audio needs the 'faster-whisper' package. Run: pip install faster-whisper"), 501
-    except Exception as exc:
-        return jsonify(error="Couldn't load the speech model. The first run needs internet to download it. (" + str(exc)[:120] + ")"), 503
-    return jsonify(ok=True, model=WHISPER_MODEL)
-
-
-@app.post("/api/transcribe")
-def transcribe():
-    """Receives one short audio chunk, transcribes it in memory, and discards it. Nothing is written to disk."""
-    audio = request.get_data()
-    if len(audio) < 1000:
-        return jsonify(text="", language="", language_name="", probability=0)
-    lang = request.args.get("lang")
-    if lang not in WHISPER_LANGS:
-        lang = None  # auto-detect
-    try:
-        model = get_whisper()
-    except ImportError:
-        return jsonify(error="Live audio needs the 'faster-whisper' package. Run: pip install faster-whisper"), 501
-    except Exception as exc:
-        return jsonify(error="Couldn't load the speech model. (" + str(exc)[:120] + ")"), 503
-    try:
-        with _infer_lock:
-            segments, info = model.transcribe(
-                io.BytesIO(audio), language=lang, task="transcribe", beam_size=1, temperature=0.0,
-                vad_filter=True, condition_on_previous_text=False,
-            )
-            parts = []
-            for s in segments:
-                # drop likely noise / hallucinated segments instead of showing fake text
-                if s.no_speech_prob > 0.6 or s.avg_logprob < -1.0:
-                    continue
-                piece = s.text.strip()
-                if piece:
-                    parts.append(piece)
-    except Exception as exc:
-        return jsonify(error="Couldn't read that audio chunk. (" + str(exc)[:100] + ")"), 422
-    text = " ".join(parts).strip()
-    return jsonify(text=text, language=info.language,
-                   language_name=LANG_NAMES.get(info.language, info.language),
-                   probability=round(float(info.language_probability), 2))
-
-
-REQUIREMENTS = "flask\ngunicorn\nlangdetect\ndeep-translator\nfaster-whisper\npillow\n"
-
-DOCKERFILE = """FROM python:3.11-slim
-WORKDIR /app
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-COPY orvex.py .
-# "tiny" speech model is fast enough for free CPU hosting; use "base" or "small" if you have more power
-ENV PORT=7860 ORVEX_WHISPER_MODEL=tiny HF_HOME=/tmp/hf
-EXPOSE 7860
-CMD gunicorn orvex:app -b 0.0.0.0:${PORT} --workers 1 --threads 4 --timeout 180
-"""
-
-SPACE_README = """---
-title: ORVEX
-emoji: 🔮
-colorFrom: indigo
-colorTo: purple
-sdk: docker
-app_port: 7860
----
-
-# ORVEX
-Voice-controlled language assistant: read screens and photos, detect the language, translate, and
-translate live audio. Run locally with `python orvex.py`.
-"""
-
-
-def export_files():
-    for name, text in (("requirements.txt", REQUIREMENTS), ("Dockerfile", DOCKERFILE), ("README.md", SPACE_README)):
-        with open(name, "w", encoding="utf-8") as f:
-            f.write(text)
-        print("wrote", name)
-    print("Upload orvex.py + these 3 files to a Hugging Face Space (SDK: Docker).")
-
-
-def setup_packages():
-    import subprocess
-    import sys
-    pkgs = [p for p in REQUIREMENTS.split() if p != "gunicorn"]   # gunicorn is only for Linux hosting
-    code = subprocess.call([sys.executable, "-m", "pip", "install"] + pkgs)
-    if code:
-        print("\nSome packages failed. If only faster-whisper failed, the app still works except live audio:")
-        print("  python -m pip install flask langdetect deep-translator pillow")
-    else:
-        print("\nAll set. Now run: python orvex.py")
-
-
-if __name__ == "__main__":
-    import sys
-    if "--setup" in sys.argv:
-        setup_packages()
-        sys.exit(0)
-    if "--export" in sys.argv:
-        export_files()
-        sys.exit(0)
-    ip = lan_ip()
-    port = int(os.environ.get("PORT", "5000"))
-    print("ORVEX is running at http://127.0.0.1:%d" % port)
-    print("On your phone (same Wi-Fi): http://%s:%d   (or press the Phone button for a QR code)" % (ip, port))
-    # host 0.0.0.0 lets phones on your Wi-Fi connect; debug stays OFF because the debugger would be exposed to the network.
-    app.run(host="0.0.0.0", port=port, debug=False)
+    text = (data.get("text") or "").strip()[:2000
