@@ -1,0 +1,7 @@
+
+flask
+gunicorn
+langdetect
+faster-whisper
+pillow
+edge-tts
