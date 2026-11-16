@@ -20,12 +20,14 @@ FEATURES
     right-click for full screen / hide / quit. "Hey Orvex" brings it back until you choose Quit.
   * Installable app (PWA) with an offline service worker; sign-in is remembered for offline start
   * Accounts (orvex_users.db next to this file), optional free Gemini key (.env: GEMINI_API_KEY=...), QR code for your phone
-  * Floating translation window (tkinter) for live audio, Google Translate with MyMemory fallback, Language Lab test page
+  * Floating translation window (tkinter) for live audio, free MyMemory translation (no key, no account), Language Lab test page
 
 Speech recognition runs locally (faster-whisper), OCR runs in the browser (Tesseract.js), only TEXT goes to the translation service.
 """
 
+import html
 import io
+import json
 import os
 import re
 import secrets
@@ -34,6 +36,9 @@ import sqlite3
 import tempfile
 import threading
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 
 from flask import Flask, Response, jsonify, request, session
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -815,7 +820,7 @@ html[data-contrast="1"] .lt-big{color:#fff;background:none}
   <p id="itp-status" class="note"></p>
   <div class="subs"><div id="itp-orig" class="sub-orig"></div><div id="itp-tr" class="sub-tr"></div></div>
   <div id="itp-log" class="log"></div>
-  <p class="note">Uses your browser's speech recognition (Chrome or Edge). The text is translated with Google Translate. No audio is saved by ORVEX.</p>
+  <p class="note">Uses your browser's speech recognition (Chrome or Edge). The text is translated with the free MyMemory service. No audio is saved by ORVEX.</p>
 </section>
 
 <!-- Two-way conversation -->
@@ -958,7 +963,7 @@ html[data-contrast="1"] .lt-big{color:#fff;background:none}
   <div id="chips" class="chips"></div>
   <section class="hood">
     <span class="qlabel">Under the hood</span>
-    <div class="chips2"><span><b>Whisper</b> speech to text</span><span><b>Tesseract</b> reads images</span><span><b>langdetect</b> names the language</span><span><b>Google Translate</b> text only</span><span><b>Gemini</b> explain (optional)</span></div>
+    <div class="chips2"><span><b>Whisper</b> speech to text</span><span><b>Tesseract</b> reads images</span><span><b>langdetect</b> names the language</span><span><b>MyMemory</b> free translation (text only)</span><span><b>Gemini</b> explain (optional)</span></div>
     <p class="note" style="text-align:center">Screens, photos and camera frames stay in your browser. Only text is ever sent anywhere.</p>
   </section>
 </main>
@@ -1373,9 +1378,13 @@ async function detectLang(text) {
   if (!r.ok) throw new Error(d.error || "Detection failed");
   return d;
 }
-async function translateText(text, target) {
-  const r = await fetch("/api/translate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text, target }) });
-  const d = await r.json();
+async function translateText(text, target, source) {   // source is optional: when given, the chosen spoken language is used instead of guessing
+  if (navigator.onLine === false) throw new Error("No internet connection. Translation needs internet.");
+  let r;
+  try { r = await fetch("/api/translate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text, target, source: source || "" }) }); }
+  catch (e) { throw new Error("Couldn't reach ORVEX. Check that it is still running and that you are online."); }
+  let d = {};
+  try { d = await r.json(); } catch (e) {}
   if (!r.ok) throw new Error(d.error || "Translation failed");
   return d.translation;
 }
@@ -1557,7 +1566,10 @@ function itpInterim(t) {
   clearTimeout(itp.timer);
   itp.timer = setTimeout(async () => {
     const seq = ++itp.seq;
-    try { const tr = await translateText(t, $("itp-tgt").value); if (seq === itp.seq) $("itp-tr").textContent = tr; } catch (e) {}
+    try {
+      const tr = await translateText(t, $("itp-tgt").value, $("itp-src").value);
+      if (seq === itp.seq) { $("itp-tr").textContent = tr; if ($("itp-status").textContent.startsWith("⚠")) $("itp-status").textContent = "Listening… speak now."; }
+    } catch (e) { if (seq === itp.seq) $("itp-status").textContent = "⚠ " + e.message; }
   }, 350);
 }
 async function itpFinal(t) {
@@ -1565,7 +1577,7 @@ async function itpFinal(t) {
   const st = itp.segStart !== null ? itp.segStart : Date.now() - 2000; itp.segStart = null;
   $("itp-orig").textContent = t;
   try {
-    const target = $("itp-tgt").value, tr = await translateText(t, target);
+    const target = $("itp-tgt").value, tr = await translateText(t, target, $("itp-src").value);
     if (seq === itp.seq) $("itp-tr").textContent = tr;
     itp.lines.push({ st, en: Date.now(), o: t, tr });
     const ln = document.createElement("div"); ln.className = "ln"; ln.textContent = tr;
@@ -1604,7 +1616,7 @@ function cvSpeak(side) {
     onInterim: (t) => { st.textContent = "… " + t; },
     onFinal: async (t) => {
       got = true; st.textContent = "Translating…";
-      try { const tr = await translateText(t, to); cvAdd(side, t, tr, from, to); st.textContent = "Done. Your turn, or the other person's."; speak(tr, BCP[to] || to, true); }
+      try { const tr = await translateText(t, to, from); cvAdd(side, t, tr, from, to); st.textContent = "Done. Your turn, or the other person's."; speak(tr, BCP[to] || to, true); }
       catch (e) { st.textContent = "⚠ " + e.message; }
     },
     onError: (er) => { st.textContent = (er === "not-allowed" || er === "service-not-allowed") ? "Microphone blocked. Allow it in the address bar." : "I couldn't hear that (" + er + ")."; },
@@ -1781,7 +1793,7 @@ function liveSend(blob) {
       if (!r.ok) throw new Error(d.error || "Speech recognition failed");
       const text = (d.text || "").trim(); if (!text || !live.on) return;
       const target = $("live-target").value; let tr = text;
-      if (String(d.language || "").toLowerCase() !== target.toLowerCase()) tr = await translateText(text, target);
+      if (String(d.language || "").toLowerCase() !== target.toLowerCase()) tr = await translateText(text, target, d.language);
       const row = el("div", "lrow"), o = el("div"), t = el("div");
       const tg = el("span", "tag2", d.language ? langName(d.language) : "Heard"); o.append(tg, document.createTextNode(text)); t.textContent = tr;
       row.append(o, t); const g = $("live-grid"); g.appendChild(row); g.scrollTop = g.scrollHeight;
@@ -2358,9 +2370,7 @@ Robot.setMood("happy", "Hi, I'm ORVEX!", 3000);
 </script>
 </body>
 </html>
-"""
-
-# ---------------------------------------------------------------------------
+"""# ---------------------------------------------------------------------------
 # PWA files (makes ORVEX installable on laptop and phone, and usable offline once installed)
 # ---------------------------------------------------------------------------
 ICON_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
@@ -2582,65 +2592,151 @@ def detect_language():
     return jsonify(code=top["code"], name=top["name"], confidence=top["confidence"], alternatives=out[1:])
 
 
-def _chunks(text, n):
-    parts, cur = [], ""
+# ---------------------------------------------------------------------------
+# Translation: MyMemory only (free, no account, no API key). All requests are made by this Python server,
+# so the page never talks to MyMemory directly. If MyMemory fails, ORVEX shows a clear error and does NOT
+# pretend the translation worked and does NOT switch to any other service.
+# ---------------------------------------------------------------------------
+MM_URL = "https://api.mymemory.translated.net/get"
+MSG_OFFLINE = "No internet connection. ORVEX can't reach the free MyMemory translation service. Check your Wi-Fi or network and try again."
+MSG_QUOTA = "MyMemory's free translation limit has been reached for now. It resets daily, so please try again later."
+MSG_SLOW = "MyMemory took too long to answer. Please try again in a moment."
+LANG_OK = re.compile(r"^[A-Za-z]{2,3}(-[A-Za-z]{2,4})?$")
+_TR_CACHE = {}
+_TR_LOCK = threading.Lock()
+
+
+class TranslateError(Exception):
+    def __init__(self, message, status=502):
+        Exception.__init__(self, message)
+        self.status = status
+
+
+def _mm_lang(code):
+    c = norm_code(code)
+    return {"zh": "zh-CN", "iw": "he"}.get(c, c)
+
+
+def _split_bytes(text, limit=450):
+    """MyMemory accepts about 500 bytes per request, so long text is cut into pieces (sentence by sentence)."""
+    def size(s):
+        return len(s.encode("utf-8"))
+    out, cur = [], ""
     for piece in re.split(r"(?<=[.!?।。！？\n])\s*", text):
-        if len(cur) + len(piece) + 1 > n and cur:
-            parts.append(cur)
-            cur = ""
-        while len(piece) > n:
-            parts.append(piece[:n])
-            piece = piece[n:]
-        cur = (cur + " " + piece).strip() if cur else piece
+        if not piece:
+            continue
+        while size(piece) > limit:
+            cut = min(len(piece), limit)
+            while size(piece[:cut]) > limit:
+                cut -= 1
+            sp = piece.rfind(" ", 0, cut)
+            if sp > cut // 2:
+                cut = sp
+            if cur:
+                out.append(cur)
+                cur = ""
+            out.append(piece[:cut].strip())
+            piece = piece[cut:].lstrip()
+        if not piece:
+            continue
+        cand = (cur + " " + piece).strip() if cur else piece
+        if size(cand) > limit:
+            out.append(cur)
+            cur = piece
+        else:
+            cur = cand
     if cur:
-        parts.append(cur)
-    return parts or [text]
+        out.append(cur)
+    return [p for p in out if p] or [text]
 
 
-def do_translate(text, target):
-    """Google Translate first. If it fails or is rate-limited, the free MyMemory service takes over."""
+def _mymemory_call(text, src, tgt):
+    params = {"q": text, "langpair": src + "|" + tgt}
+    email = os.environ.get("ORVEX_MYMEMORY_EMAIL", "").strip()   # optional and free: your email gives a bigger daily allowance
+    if EMAIL_RE.match(email):
+        params["de"] = email
+    req = urllib.request.Request(MM_URL + "?" + urllib.parse.urlencode(params),
+                                 headers={"User-Agent": "ORVEX/4 translation helper", "Accept": "application/json"})
     try:
-        from deep_translator import GoogleTranslator
-    except ImportError:
-        raise RuntimeError("Translation needs: pip install deep-translator")
-    err = None
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            raw = resp.read(300000)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 429:
+            raise TranslateError(MSG_QUOTA, 429)
+        raise TranslateError("MyMemory is not available right now (error %s). Please try again later." % exc.code, 502)
+    except (urllib.error.URLError, OSError) as exc:
+        reason = getattr(exc, "reason", exc)
+        if isinstance(reason, TimeoutError) or isinstance(exc, TimeoutError):
+            raise TranslateError(MSG_SLOW, 504)
+        raise TranslateError(MSG_OFFLINE, 503)
     try:
-        out = [GoogleTranslator(source="auto", target=target).translate(p) or "" for p in _chunks(text, 4500)]
-        res = " ".join(o for o in out if o).strip()
-        if res:
-            return res
-    except Exception as exc:
-        err = exc
-    try:
-        from deep_translator import MyMemoryTranslator
-        src = "en"
-        if HAVE_LANGDETECT:
-            try:
-                src = norm_code(detect_langs(text)[0].lang)
-            except Exception:
-                pass
-        if src.lower() == target.lower():
-            return text
-        out = [MyMemoryTranslator(source=src, target=target).translate(p) or "" for p in _chunks(text, 450)]
-        res = " ".join(o for o in out if o).strip()
-        if res:
-            return res
-    except Exception as exc:
-        err = err or exc
-    raise RuntimeError("Translation isn't available right now. Check your internet connection and try again.")
+        data = json.loads(raw.decode("utf-8", "replace"))
+        if not isinstance(data, dict):
+            raise ValueError("not an object")
+    except ValueError:
+        raise TranslateError("MyMemory sent an answer that ORVEX could not read. Please try again later.", 502)
+    status = str(data.get("responseStatus", ""))
+    rd = data.get("responseData")
+    out = str(rd.get("translatedText") or "").strip() if isinstance(rd, dict) else ""
+    details = str(data.get("responseDetails") or "").strip()
+    blob = (out + " " + details).upper()
+    if status == "429" or "MYMEMORY WARNING" in blob or "USED ALL AVAILABLE FREE" in blob:
+        raise TranslateError(MSG_QUOTA, 429)
+    if status != "200":
+        raise TranslateError("MyMemory could not translate this" + (": " + details[:120] if details else "."), 502)
+    if not out or "QUERY LENGTH LIMIT" in blob:
+        raise TranslateError("MyMemory did not return a translation. Please try again with shorter text.", 502)
+    return html.unescape(out)
+
+
+def do_translate(text, target, source=None):
+    """Translate with MyMemory. Raises TranslateError (with a clear message) when it can't; never returns fake text."""
+    tgt = _mm_lang(target)
+    src = ""
+    s = (source or "").strip()
+    if s and s.lower() not in ("auto", "autodetect"):
+        src = _mm_lang(s)
+    elif HAVE_LANGDETECT:
+        try:
+            src = _mm_lang(detect_langs(text)[0].lang)
+        except Exception:
+            src = ""
+    if not src:
+        src = "Autodetect"
+    if src != "Autodetect" and (src.lower() == tgt.lower() or src.lower() == tgt.split("-")[0].lower()):
+        return text   # already in the wanted language
+    key = (src, tgt, text)
+    with _TR_LOCK:
+        if key in _TR_CACHE:
+            return _TR_CACHE[key]
+    result = " ".join(_mymemory_call(p, src, tgt) for p in _split_bytes(text)).strip()
+    if not result:
+        raise TranslateError("MyMemory did not return a translation.", 502)
+    with _TR_LOCK:
+        if len(_TR_CACHE) > 400:
+            _TR_CACHE.clear()
+        _TR_CACHE[key] = result
+    return result
 
 
 @app.post("/api/translate")
 def translate():
     d = request.get_json(silent=True) or {}
     text = (d.get("text") or "").strip()[:4500]
-    target = (d.get("target") or "en").strip()[:10]
+    target = str(d.get("target") or "en").strip()[:10]
+    source = str(d.get("source") or "").strip()[:10]
     if not text:
         return jsonify(error="No text to translate."), 400
+    if not LANG_OK.match(target):
+        return jsonify(error="That target language isn't supported."), 400
+    if source and source.lower() not in ("auto", "autodetect") and not LANG_OK.match(source):
+        source = ""
     try:
-        return jsonify(translation=do_translate(text, target))
-    except RuntimeError as exc:
-        return jsonify(error=str(exc)), 502
+        return jsonify(translation=do_translate(text, target, source or None))
+    except TranslateError as exc:
+        return jsonify(error=str(exc)), exc.status
+    except Exception:
+        return jsonify(error="Translation failed unexpectedly. Please try again."), 500
 
 
 # ---------------------------------------------------------------------------
@@ -3973,8 +4069,8 @@ def run_overlay(port, token):
 
 
 
-REQUIREMENTS = "flask\ngunicorn\nlangdetect\ndeep-translator\nfaster-whisper\npillow\nedge-tts\n"
-SETUP_CORE = ["flask", "langdetect", "deep-translator", "faster-whisper", "pillow", "edge-tts"]
+REQUIREMENTS = "flask\ngunicorn\nlangdetect\nfaster-whisper\npillow\nedge-tts\n"
+SETUP_CORE = ["flask", "langdetect", "faster-whisper", "pillow", "edge-tts"]
 SETUP_OPTIONAL = ["sounddevice", "numpy"]   # only for the background "Hey Orvex" listener in desktop mode
 
 DOCKERFILE = """FROM python:3.11-slim
@@ -4015,7 +4111,7 @@ def setup_packages():
     code = subprocess.call([sys.executable, "-m", "pip", "install"] + SETUP_CORE)
     if code:
         print("\nSome packages failed. If only faster-whisper failed, ORVEX still works except live tab audio:")
-        print("  python -m pip install flask langdetect deep-translator pillow edge-tts")
+        print("  python -m pip install flask langdetect pillow edge-tts")
     for p in SETUP_OPTIONAL:
         if subprocess.call([sys.executable, "-m", "pip", "install", p]):
             print("(optional package %s did not install: the background wake word will be off, everything else works)" % p)
