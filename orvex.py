@@ -603,6 +603,37 @@ html[data-contrast="1"] .lt-big{color:#fff;background:none}
 @keyframes fall{to{transform:translateY(110vh) rotate(540deg);opacity:.2}}
 @keyframes shake{25%{transform:translateX(-6px)}75%{transform:translateX(6px)}}
 </style>
+<style>
+/* ORVEX_V5 polish: animated headline, shiny buttons, floating mini orb */
+h1{background-size:220% 100%;animation:hue5 9s ease-in-out infinite alternate}
+@keyframes hue5{to{background-position:100% 0}}
+.pill.go{position:relative;overflow:hidden}
+.pill.go::after{content:"";position:absolute;inset:0;pointer-events:none;background:linear-gradient(110deg,transparent 30%,rgba(255,255,255,.35) 50%,transparent 70%);transform:translateX(-120%);animation:shine5 4.5s ease-in-out infinite}
+@keyframes shine5{60%,100%{transform:translateX(120%)}}
+.quick{box-shadow:0 20px 60px rgba(0,0,0,.35),0 0 0 1px rgba(34,211,238,.1),0 0 70px rgba(124,92,255,.14)}
+.card:hover{box-shadow:0 24px 50px rgba(0,0,0,.45),0 0 36px var(--g,rgba(124,92,255,.4))}
+.lbanner{display:flex;align-items:center;justify-content:center;gap:.6rem;flex-wrap:wrap;padding:.7rem 1rem;border-radius:1rem;border:1px dashed rgba(244,114,182,.55);background:rgba(244,114,182,.1);font-size:.9rem;text-align:center}
+#mini-orb{position:fixed;z-index:50;width:64px;height:64px;border-radius:50%;overflow:hidden;cursor:grab;touch-action:none;user-select:none;-webkit-user-select:none;border:1px solid rgba(255,255,255,.35);background:#0a0a12;box-shadow:0 0 26px rgba(124,92,255,.65),0 0 60px rgba(34,211,238,.25),inset 0 0 18px rgba(34,211,238,.25);transition:left .28s cubic-bezier(.2,.9,.3,1.2),top .28s ease,transform .2s}
+#mini-orb:hover{transform:scale(1.08)}
+#mini-orb.drag{transition:none;cursor:grabbing;transform:scale(1.15)}
+#mini-orb.wake{animation:miniwake 1.1s ease 2}
+#mini-orb .mo-sw{position:absolute;inset:-25%;filter:blur(8px);animation:spin 10s linear infinite;background:radial-gradient(circle at 30% 30%,#4f6bff 0,transparent 42%),radial-gradient(circle at 75% 28%,#c026d3 0,transparent 42%),radial-gradient(circle at 32% 75%,#14d4a8 0,transparent 42%),radial-gradient(circle at 72% 75%,#b45309 0,transparent 42%)}
+#mini-orb .mo-sh{position:absolute;inset:0;border-radius:50%;background:radial-gradient(circle at 50% 40%,transparent 50%,rgba(0,0,0,.6) 100%)}
+#mini-orb .mo-eyes{position:absolute;top:30%;left:0;right:0;display:flex;justify-content:center;gap:16px;transition:transform .12s}
+#mini-orb .mo-eyes i{width:5px;height:19px;border-radius:4px;background:#fff;box-shadow:0 0 8px #fff;animation:blink 4.5s infinite}
+@keyframes miniwake{50%{box-shadow:0 0 0 14px rgba(34,211,238,.35),0 0 60px rgba(34,211,238,.9)}}
+#mini-x{position:fixed;left:50%;top:50%;z-index:49;width:104px;height:104px;margin:-52px 0 0 -52px;border-radius:50%;display:grid;place-items:center;font-size:2.6rem;color:#fecaca;background:rgba(59,18,32,.82);border:3px solid #f87171;backdrop-filter:blur(6px);transition:.15s;pointer-events:none}
+#mini-x.hot{background:#dc2626;color:#fff;transform:scale(1.18);box-shadow:0 0 50px rgba(248,113,113,.8)}
+#mini-menu{position:fixed;z-index:51;width:min(290px,92vw);padding:.5rem;border-radius:1.2rem;background:rgba(13,11,36,.97);border:1px solid var(--line);box-shadow:0 20px 60px rgba(0,0,0,.6);animation:pop .15s}
+#mini-menu .mm-h{font-size:.72rem;letter-spacing:.22em;text-transform:uppercase;color:var(--b);font-weight:700;padding:.3rem .7rem}
+#mini-menu .mm-hr{height:1px;background:var(--line);margin:.3rem .4rem}
+#mini-menu button{width:100%;display:flex;align-items:center;gap:.7rem;text-align:left;padding:.5rem .7rem;border:0;border-radius:.8rem;background:transparent;color:var(--ink)}
+#mini-menu button:hover,#mini-menu button:focus-visible{background:linear-gradient(90deg,rgba(124,92,255,.35),rgba(34,211,238,.2))}
+#mini-menu .mm-i{font-size:1.25rem;width:1.6rem;text-align:center}
+#mini-menu .mm-t{display:flex;flex-direction:column;line-height:1.25}
+#mini-menu .mm-t small{color:var(--mut);font-size:.76rem}
+</style>
+
 </head>
 <body>
 <div class="bg"><i></i><i></i><i></i></div>
@@ -632,7 +663,7 @@ html[data-contrast="1"] .lt-big{color:#fff;background:none}
   <label class="row"><input type="checkbox" id="opt-auto"> Speak translations automatically</label>
   <label class="row"><input type="checkbox" id="opt-wake" checked> Wake word: say “Orvex” first</label>
   <div id="key-box" class="keybox" hidden>
-    <span class="note">Optional: free Gemini API key (aistudio.google.com/apikey) to unlock ✨ Explain, Simplify and Replies. Kept in memory only. To keep it permanently, put GEMINI_API_KEY=... in a .env file next to orvex.py.</span>
+    <span class="note">Optional: free Gemini API key (aistudio.google.com/apikey) to unlock the AI tutor (any language, any sentence, with easy pronunciation) and ✨ Explain, Simplify and Replies. It is checked, then saved in a private .env file next to orvex.py on this computer (never uploaded).</span>
     <div class="row"><input id="key-in" type="password" placeholder="AIza…" autocomplete="off" aria-label="Gemini API key"><button id="key-save" class="mini" type="button">Save</button></div>
   </div>
   <span id="ai-chip" class="note"></span>
@@ -689,6 +720,7 @@ html[data-contrast="1"] .lt-big{color:#fff;background:none}
         <h2>Learn any language</h2>
         <p class="sub">Pick a language, tap a lesson, or tell me exactly what you want to say. I show it, spell out how to pronounce it, and say it in a natural voice.</p>
       </div>
+      <div id="l-ai-note" class="lbanner" hidden></div>
       <div class="lsect">1 · I want to learn</div>
       <div id="l-chips" class="lchips"></div>
       <div class="row" style="justify-content:center;margin-top:.5rem"><label class="note" for="l-any">Another language (the AI tutor teaches it):</label><select id="l-any"></select></div>
@@ -1167,7 +1199,7 @@ const mic = $("mic");
 let recognition = null, wantListening = false;
 function stopListening() { wantListening = false; mic.classList.remove("active"); if (recognition) { try { recognition.stop(); } catch (e) {} } }
 
-const WAKE_RE = /\b(?:(?:hey|hi|hello|ok|okay)\s+)?(?:orvex|or\s?vex|or\s?vecs|or\s?becks|or\s?bex|orvax|orbex|orwex|ervex|orvix|orbix|arvex|aarvex|orwax|or\s?wax)\b/i;   // add more spellings here if the browser mishears the name
+const WAKE_RE = /\b(?:(?:(?:hey|hi|hello|ok|okay)\s+)?(?:orvex|or\s?vex|or\s?vecs|or\s?becks|or\s?bex|orvax|orbex|orwex|ervex|orvix|orbix|arvex|aarvex|orwax|or\s?wax)|(?:hey|hi|ok|okay)\s+(?:vex|vecs|bex|becks))\b/i;   // add more spellings here if the browser mishears the name
 let armedUntil = 0, lastWakeAt = 0, lastHandled = "", lastHandledAt = 0, restartDelay = 300, recStartedAt = 0;
 function beep() {
   try {
@@ -1405,7 +1437,7 @@ function fillLang(sel, def) { LANGS.forEach(([c, n]) => sel.add(new Option(n, c)
 function langName(c) { const k = LANGS.find((x) => x[0] === c); return k ? k[1] : c; }
 fillLang($("itp-src"), "en"); fillLang($("cv-a"), "en"); fillLang($("cv-b"), "hi");
 let toastT;
-function toast(m) { const t = $("toast"); t.textContent = m; t.hidden = false; clearTimeout(toastT); toastT = setTimeout(() => { t.hidden = true; }, 2600); }
+function toast(m, ms) { const t = $("toast"); t.textContent = m; t.hidden = false; clearTimeout(toastT); toastT = setTimeout(() => { t.hidden = true; }, ms || 2600); }
 async function copyText(t) { try { await navigator.clipboard.writeText(t); toast("Copied ✓"); } catch (e) { toast("Couldn't copy"); } }
 function mk(parent, label, fn) { const b = document.createElement("button"); b.type = "button"; b.className = "mini"; b.textContent = label; b.addEventListener("click", fn); parent.appendChild(b); return b; }
 function dl(name, text) { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([text], { type: "text/plain;charset=utf-8" })); a.download = name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 3000); }
@@ -1525,11 +1557,15 @@ async function loadConfig() {
 }
 $("key-save").addEventListener("click", async () => {
   const k = $("key-in").value.trim(); if (!k) return;
+  const btn = $("key-save"); btn.disabled = true; toast("Checking your key…", 6000);
   try {
-    const r = await fetch("/api/set-key", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key: k }) });
+    const r = await fetch("/api/set-key", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key: k, save: true }) });
     const d = await r.json(); if (!r.ok) throw new Error(d.error || "Couldn't save the key");
-    $("key-in").value = ""; toast("Key set for this session ✨"); loadConfig();
-  } catch (e) { toast("⚠ " + e.message); }
+    $("key-in").value = "";
+    toast(d.warn ? "Key saved. Note: " + d.warn : (d.saved ? "AI key works and is saved ✨" : "AI key works for this session ✨"), 4000);
+    loadConfig(); if (window.__orvexInfo) window.__orvexInfo(); window.dispatchEvent(new Event("orvex-ai"));
+  } catch (e) { toast("⚠ " + e.message, 5000); }
+  finally { btn.disabled = false; }
 });
 loadConfig();
 
@@ -1842,7 +1878,14 @@ let deferredInstall = null;
 function showInstall(on) { $("install-btn").hidden = !on; $("install-btn2").hidden = !on; }
 window.addEventListener("beforeinstallprompt", (e) => { e.preventDefault(); deferredInstall = e; showInstall(true); });
 window.addEventListener("appinstalled", () => { deferredInstall = null; showInstall(false); toast("ORVEX is installed ✓"); });
-async function doInstall() { if (!deferredInstall) { toast("Use your browser menu → Install app"); return; } deferredInstall.prompt(); try { await deferredInstall.userChoice; } catch (e) {} deferredInstall = null; showInstall(false); }
+async function doInstall() {
+  if (!deferredInstall) {
+    const ios = /iphone|ipad|ipod/i.test(navigator.userAgent);
+    toast(ios ? "iPhone/iPad: tap Share ⬆ then “Add to Home Screen”." : !window.isSecureContext ? "Install needs https or localhost. Open ORVEX at http://127.0.0.1:5000 on this computer, or host it online (https)." : "In Chrome or Edge: open the ⋮ menu → “Install ORVEX” (or use the install icon in the address bar).", 7000);
+    return;
+  }
+  deferredInstall.prompt(); try { await deferredInstall.userChoice; } catch (e) {} deferredInstall = null;
+}
 $("install-btn").addEventListener("click", doInstall); $("install-btn2").addEventListener("click", doInstall);
 
 // ---------- Cards, header buttons, help ----------
@@ -1944,7 +1987,7 @@ async function checkServer() {
   } catch (e) { $("status").classList.add("offline"); $("status-text").textContent = navigator.onLine ? "Server not reachable" : "Offline"; }
 }
 checkServer(); setInterval(checkServer, 20000); addEventListener("online", checkServer); addEventListener("offline", checkServer);
-if (matchMedia("(display-mode: standalone)").matches) showInstall(false);
+showInstall(!(matchMedia("(display-mode: standalone)").matches || window.navigator.standalone));
 if ("serviceWorker" in navigator && (location.protocol === "https:" || /^(localhost|127\.0\.0\.1)$/.test(location.hostname))) navigator.serviceWorker.register("/sw.js").catch(() => {});
 tryAutoWake();
 Robot.setMood("happy", "Hi, I'm ORVEX!", 3000);
@@ -2363,14 +2406,143 @@ Robot.setMood("happy", "Hi, I'm ORVEX!", 3000);
   window.addEventListener("online", netCheck); window.addEventListener("offline", () => { netCheck(); toast("You're offline. Lessons, saved phrases and heard audio still work."); });
 
   // ----- start -----
-  syncSw(); loadInfo(); showXP();
+  window.__orvexInfo = loadInfo; syncSw(); loadInfo(); showXP();
   if (store.get("orvex-mode", "translate") === "learn") setMode("learn");
+})();
+
+// ---------- ORVEX_V5: AI-tutor banner + floating mini orb (works in the browser, the installed app and on phones) ----------
+(function () {
+  async function refreshBanner() {
+    const b = document.getElementById("l-ai-note"); if (!b) return;
+    try {
+      const c = await (await _fetch("/api/config")).json();
+      if (c.ai) { b.hidden = true; return; }
+      b.hidden = false; b.textContent = "";
+      const t = document.createElement("span");
+      t.textContent = "✨ AI tutor is off. Add a free Gemini key so I can teach ANY language and any sentence you type, with easy pronunciation.";
+      b.appendChild(t);
+      if (c.can_set_key) { const k = document.createElement("button"); k.type = "button"; k.className = "mini ai"; k.textContent = "Add key"; k.addEventListener("click", () => { settings.hidden = false; }); b.appendChild(k); }
+      else b.appendChild(document.createTextNode(" Set GEMINI_API_KEY on your host."));
+    } catch (e) {}
+  }
+  window.addEventListener("orvex-ai", refreshBanner);
+  ["learn-sw", "mode-sw"].forEach((id) => { const e = document.getElementById(id); if (e) e.addEventListener("change", () => setTimeout(refreshBanner, 400)); });
+  refreshBanner();
+
+  try {
+    const SZ = 64, EDGE = 8;
+    let st = null; try { st = JSON.parse(localStorage.getItem("orvex-mini") || "null"); } catch (e) {}
+    st = st && typeof st === "object" ? st : {};
+    if (typeof st.x !== "number") st.x = 1;      // 0 = left edge, 1 = right edge
+    if (typeof st.y !== "number") st.y = 0.55;   // fraction of the screen height
+    st.hidden = !!st.hidden;
+    const save = () => { try { localStorage.setItem("orvex-mini", JSON.stringify(st)); } catch (e) {} };
+    const mk = (tag, id) => { const e = document.createElement(tag); e.id = id; return e; };
+    const orb = mk("div", "mini-orb"), zone = mk("div", "mini-x"), menu = mk("div", "mini-menu");
+    orb.setAttribute("role", "button"); orb.setAttribute("aria-label", "ORVEX quick menu"); orb.tabIndex = 0;
+    orb.title = "ORVEX: click for the quick menu, drag to move, right-click for more";
+    orb.innerHTML = '<div class="mo-sw"></div><div class="mo-sh"></div><div class="mo-eyes"><i></i><i></i></div>';
+    zone.textContent = "✕"; zone.hidden = true; menu.hidden = true;
+    document.body.append(orb, zone, menu);
+    const eyes = orb.querySelector(".mo-eyes");
+    let desk = false, drag = null;
+    const W = () => window.innerWidth, H = () => window.innerHeight;
+    const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+    const over = (x, y) => Math.hypot(x + SZ / 2 - W() / 2, y + SZ / 2 - H() / 2) <= 70;
+    function place() {
+      orb.style.left = (st.x < 0.5 ? EDGE : W() - SZ - EDGE) + "px";
+      orb.style.top = clamp(Math.round(st.y * H()), 70, Math.max(70, H() - SZ - 90)) + "px";
+    }
+    function visible() { return !!me && !st.hidden && !desk && document.getElementById("auth").hidden; }
+    function sync() { const v = visible(); orb.style.display = v ? "" : "none"; if (!v) closeMenu(); }
+    function closeMenu() { menu.hidden = true; }
+    function addBtn(icon, title, desc, fn) {
+      const b = document.createElement("button"); b.type = "button";
+      const i = document.createElement("span"); i.className = "mm-i"; i.textContent = icon;
+      const t = document.createElement("span"); t.className = "mm-t";
+      const bt = document.createElement("b"); bt.textContent = title; t.appendChild(bt);
+      if (desc) { const s = document.createElement("small"); s.textContent = desc; t.appendChild(s); }
+      b.append(i, t); b.addEventListener("click", () => { closeMenu(); fn(); }); menu.appendChild(b);
+    }
+    function fullscreen() {
+      try { const d = document.documentElement; if (document.fullscreenElement) document.exitFullscreen(); else (d.requestFullscreen || d.webkitRequestFullscreen).call(d); }
+      catch (e) { toast("Full screen isn't available here"); }
+    }
+    function hide() { st.hidden = true; save(); sync(); toast("Orb hidden. Say “Hey Orvex” to bring it back."); }
+    function show(wake) {
+      if (st.hidden) { st.hidden = false; save(); }
+      sync(); place();
+      if (wake) { orb.classList.remove("wake"); void orb.offsetWidth; orb.classList.add("wake"); }
+    }
+    const ITEMS = [["🌐", "Translate text", "Type words, see them in any language", "translate"], ["🖥", "Read screen or photo", "Reads text and names the language", "screen"],
+      ["🎙", "Live interpreter", "Speak and get live subtitles", "itp"], ["💬", "Conversation", "Two people, two languages", "convo"],
+      ["📷", "Camera lens", "Translate signs and menus", "lens"], ["🎓", "Learn a language", "Duolingo-style lessons by AI", "learn"]];
+    function mainItems() {
+      const h = document.createElement("div"); h.className = "mm-h"; h.textContent = "ORVEX"; menu.appendChild(h);
+      ITEMS.forEach(([i, t, d, k]) => addBtn(i, t, d, () => { location.hash = "#open=" + k; }));
+      const hr = document.createElement("div"); hr.className = "mm-hr"; menu.appendChild(hr);
+      addBtn("⛶", "Open full screen", "", fullscreen);
+      addBtn("✕", "Hide orb", "Say “Hey Orvex” to bring it back", hide);
+    }
+    function ctxItems() { addBtn("⛶", "Open full screen", "", fullscreen); addBtn("✕", "Hide orb", "Say “Hey Orvex” to bring it back", hide); }
+    function openMenu(build, x, y) {
+      menu.textContent = ""; build(); menu.hidden = false;
+      menu.style.left = clamp(x, 8, W() - menu.offsetWidth - 8) + "px"; menu.style.top = clamp(y, 8, H() - menu.offsetHeight - 8) + "px";
+    }
+    function toggleMenu() {
+      if (!menu.hidden) { closeMenu(); return; }
+      const r = orb.getBoundingClientRect();
+      openMenu(mainItems, r.left > W() / 2 ? r.left - 298 : r.right + 8, r.top - 120);
+    }
+    orb.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0) return;
+      drag = { sx: e.clientX, sy: e.clientY, ox: orb.offsetLeft, oy: orb.offsetTop, moved: false };
+      try { orb.setPointerCapture(e.pointerId); } catch (x) {}
+    });
+    orb.addEventListener("pointermove", (e) => {
+      if (!drag) return;
+      const dx = e.clientX - drag.sx, dy = e.clientY - drag.sy;
+      if (!drag.moved && Math.hypot(dx, dy) > 6) { drag.moved = true; closeMenu(); zone.hidden = false; orb.classList.add("drag"); }
+      if (drag.moved) {
+        const x = clamp(drag.ox + dx, 0, W() - SZ), y = clamp(drag.oy + dy, 0, H() - SZ);
+        orb.style.left = x + "px"; orb.style.top = y + "px"; zone.classList.toggle("hot", over(x, y));
+      }
+    });
+    function endDrag(cancel) {
+      if (!drag) return;
+      const d = drag; drag = null; zone.hidden = true; zone.classList.remove("hot"); orb.classList.remove("drag");
+      if (d.moved) {
+        const x = orb.offsetLeft, y = orb.offsetTop;
+        if (!cancel && over(x, y)) hide();
+        else { st.x = x + SZ / 2 < W() / 2 ? 0 : 1; st.y = clamp(y / H(), 0.02, 0.98); save(); place(); }
+      } else if (!cancel) toggleMenu();
+    }
+    orb.addEventListener("pointerup", () => endDrag(false));
+    orb.addEventListener("pointercancel", () => endDrag(true));
+    orb.addEventListener("contextmenu", (e) => { e.preventDefault(); openMenu(ctxItems, e.clientX - 120, e.clientY - 20); });
+    orb.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggleMenu(); } });
+    document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeMenu(); });
+    document.addEventListener("pointerdown", (e) => { if (!menu.hidden && !menu.contains(e.target) && !orb.contains(e.target)) closeMenu(); });
+    document.addEventListener("pointermove", (e) => {   // the orb's eyes follow your pointer
+      if (orb.style.display === "none") return;
+      const r = orb.getBoundingClientRect();
+      const dx = clamp((e.clientX - (r.left + r.width / 2)) / 300, -1, 1) * 5, dy = clamp((e.clientY - (r.top + r.height / 2)) / 300, -1, 1) * 3;
+      eyes.style.transform = "translate(" + dx + "px," + dy + "px)";
+    });
+    addEventListener("resize", place);
+    const _aw = armWake;
+    armWake = function () { _aw(); show(true); };   // saying "Hey Orvex" brings a hidden orb back
+    _fetch("/api/v4/info").then((r) => r.json()).then((d) => { desk = !!d.desktop; sync(); }).catch(() => {});   // the desktop app has its own native orb
+    place(); sync(); setInterval(sync, 700);
+  } catch (e) { console.warn("mini orb off:", e); }
 })();
 
 </script>
 </body>
 </html>
-"""# ---------------------------------------------------------------------------
+"""
+
+# ---------------------------------------------------------------------------
 # PWA files (makes ORVEX installable on laptop and phone, and usable offline once installed)
 # ---------------------------------------------------------------------------
 ICON_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
@@ -2404,7 +2576,7 @@ MANIFEST = r"""{
 }
 """
 
-SERVICE_WORKER = r"""const V = 'orvex-v4';
+SERVICE_WORKER = r"""const V = 'orvex-v5';
 const SHELL = ['/', '/manifest.webmanifest', '/icon.svg', '/icon.png'];
 const LIBS = ['https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js', 'https://cdn.jsdelivr.net/npm/qrcode@1.5.4/build/qrcode.min.js'];
 const CDN = /(^|\.)(jsdelivr\.net|cdnjs\.cloudflare\.com|gstatic\.com|googleapis\.com|projectnaptha\.com)$/;
@@ -2918,21 +3090,21 @@ def _load_key():
 
 AI_KEY = _load_key()
 # Tried in order. If Google retires or rate-limits one model, the next is used automatically.
-AI_MODELS = [m for m in (os.environ.get("ORVEX_AI_MODEL"), "gemini-flash-latest", "gemini-flash-lite-latest", "gemini-2.5-flash-lite") if m]
+AI_MODELS = [m for m in (os.environ.get("ORVEX_AI_MODEL"), "gemini-flash-latest", "gemini-flash-lite-latest", "gemini-2.5-flash", "gemini-2.5-flash-lite") if m]
 
 
 def is_local():
     return request.remote_addr in ("127.0.0.1", "::1") and not request.headers.get("X-Forwarded-For")
 
 
-def ask_ai(system, user):
+def ask_ai(system, user, json_mode=False):
     import json
     import urllib.error
     import urllib.request
     body = json.dumps({
         "systemInstruction": {"parts": [{"text": system}]},
         "contents": [{"role": "user", "parts": [{"text": user}]}],
-        "generationConfig": {"maxOutputTokens": 2048, "temperature": 0.4},
+        "generationConfig": dict({"maxOutputTokens": 4096, "temperature": 0.4}, **({"responseMimeType": "application/json"} if json_mode else {})),
     }).encode()
     last = "The AI service isn't available right now."
     for model in AI_MODELS:
@@ -2943,8 +3115,12 @@ def ask_ai(system, user):
             with urllib.request.urlopen(req, timeout=40) as r:
                 data = json.load(r)
         except urllib.error.HTTPError as exc:
-            if exc.code in (400, 401, 403):
-                raise RuntimeError("Gemini rejected the request. Check your API key (free at aistudio.google.com/apikey).")
+            try:
+                detail = exc.read(2000).decode("utf-8", "replace")
+            except Exception:
+                detail = ""
+            if exc.code in (401, 403) or (exc.code == 400 and re.search(r"API key|API_KEY", detail)):
+                raise RuntimeError("Gemini rejected the request. Check your API key (free at aistudio.google.com/app/apikey).")
             last = "Gemini's free limit is reached. Wait a minute and try again." if exc.code == 429 else "Gemini returned an error (" + str(exc.code) + ")."
             continue
         except Exception:
@@ -2973,17 +3149,57 @@ def config():
     return jsonify(ai=bool(AI_KEY), can_set_key=is_local())
 
 
+def _save_env_key(key):
+    """Writes GEMINI_API_KEY=... into the .env file next to orvex.py (or the data folder). Returns True on success."""
+    for folder in (os.path.dirname(os.path.abspath(__file__)), DATA_DIR):
+        p = os.path.join(folder, ".env")
+        try:
+            lines = []
+            if os.path.exists(p):
+                with open(p, encoding="utf-8-sig") as f:
+                    lines = f.read().splitlines()
+            out, done = [], False
+            for ln in lines:
+                k = ln.split("=", 1)[0].strip()
+                if k.lower().startswith("export "):
+                    k = k[7:].strip()
+                if k == "GEMINI_API_KEY":
+                    if not done:
+                        out.append("GEMINI_API_KEY=" + key)
+                        done = True
+                else:
+                    out.append(ln)
+            if not done:
+                out.append("GEMINI_API_KEY=" + key)
+            with open(p, "w", encoding="utf-8") as f:
+                f.write("\n".join(out) + "\n")
+            return True
+        except OSError:
+            continue
+    return False
+
+
 @app.post("/api/set-key")
 def set_key():
     """Lets the person paste a Gemini API key in Settings. Only works from the same computer; the key lives in memory only."""
     global AI_KEY
     if not is_local():
         return jsonify(error="The key can only be set from the computer running ORVEX. Use the GEMINI_API_KEY setting when hosting."), 403
-    key = ((request.get_json(silent=True) or {}).get("key") or "").strip()
+    d = request.get_json(silent=True) or {}
+    key = (d.get("key") or "").strip()
     if len(key) < 20 or len(key) > 200 or re.search(r"\s", key):
         return jsonify(error="That doesn't look like a Gemini API key."), 400
-    AI_KEY = key
-    return jsonify(ok=True)
+    old, AI_KEY = AI_KEY, key
+    warn = ""
+    try:
+        ask_ai("Reply with the single word OK.", "ping")   # tiny test call so a wrong key is caught right now
+    except RuntimeError as exc:
+        if str(exc).startswith("Gemini rejected"):
+            AI_KEY = old
+            return jsonify(error=str(exc)), 400
+        warn = str(exc)   # network or free-limit trouble: the key itself may be fine, so keep it
+    saved = _save_env_key(key) if d.get("save", True) else False
+    return jsonify(ok=True, saved=saved, warn=warn)
 
 
 @app.post("/api/ai")
@@ -3200,7 +3416,7 @@ def learn():
             text = (d.get("text") or "").strip()[:300]
             if not text:
                 return jsonify(error="Type something to say first."), 400
-            obj = _json_from(ask_ai(system, "<text>" + text + "</text>"))
+            obj = _json_from(ask_ai(system, "<text>" + text + "</text>", json_mode=True))
             out = {k: str(obj.get(k) or "").strip()[:300] for k in ("text", "pron", "literal", "note")}
             if not out["text"]:
                 raise ValueError("empty")
@@ -3209,7 +3425,7 @@ def learn():
             topic = (d.get("topic") or "").strip()[:80]
             if not topic:
                 return jsonify(error="Type a topic first."), 400
-            obj = _json_from(ask_ai(system, "<topic>" + topic + "</topic>"))
+            obj = _json_from(ask_ai(system, "<topic>" + topic + "</topic>", json_mode=True))
             phrases = []
             for p in (obj.get("phrases") or [])[:8]:
                 if isinstance(p, dict):
@@ -3317,7 +3533,7 @@ def tts():
 # middle of the screen to hide it, click it for quick buttons, right-click it for "Open full screen".
 # Saying "Hey Orvex" brings it back, even after you closed the ORVEX window. It keeps running until you choose Quit.
 # ---------------------------------------------------------------------------
-WAKE_PY = re.compile(r"\b(?:(?:hey|hi|hello|ok|okay)\s+)?(?:orvex|or\s?vex|orvax|orbex|orwex|ervex|orvecs|or\s?vecs|orvix|orbix|arvex|or\s?becks)\b[\s,.:;!?-]*", re.I)
+WAKE_PY = re.compile(r"\b(?:(?:(?:hey|hi|hello|ok|okay)\s+)?(?:orvex|or\s?vex|orvax|orbex|orwex|ervex|orvecs|or\s?vecs|orvix|orbix|arvex|or\s?becks)|(?:hey|hi|ok|okay)\s+(?:vex|vecs|bex|becks))\b[\s,.:;!?-]*", re.I)
 DESK = {"on": False, "port": 5000, "events": queue.Queue(), "cmds": [], "ping": 0.0, "visible": False,
         "last_wake": 0.0, "native": "", "quit": threading.Event()}
 _desk_lock = threading.Lock()
@@ -4107,6 +4323,22 @@ def export_files():
     print("Upload orvex.py + these 3 files to a Hugging Face Space (SDK: Docker). Set GEMINI_API_KEY as a Space secret for the AI features.")
 
 
+def _write_env_template():
+    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    if os.path.exists(p):
+        return
+    try:
+        with open(p, "w", encoding="utf-8") as f:
+            f.write("# ORVEX settings. Never upload this file to GitHub.\n"
+                    "# Free Gemini key from https://aistudio.google.com/app/apikey (powers the AI tutor), paste it after the = sign:\n"
+                    "GEMINI_API_KEY=\n"
+                    "# Optional: your email gives the free MyMemory translation a bigger daily allowance:\n"
+                    "# ORVEX_MYMEMORY_EMAIL=you@example.com\n")
+        print("Created .env next to orvex.py - open it and paste your Gemini key after GEMINI_API_KEY=")
+    except OSError:
+        pass
+
+
 def setup_packages():
     code = subprocess.call([sys.executable, "-m", "pip", "install"] + SETUP_CORE)
     if code:
@@ -4115,6 +4347,7 @@ def setup_packages():
     for p in SETUP_OPTIONAL:
         if subprocess.call([sys.executable, "-m", "pip", "install", p]):
             print("(optional package %s did not install: the background wake word will be off, everything else works)" % p)
+    _write_env_template()
     print("\nAll set. Now run:  python orvex.py   (website)   or   python orvex.py --app   (desktop app with the floating orb)")
 
 
