@@ -882,7 +882,9 @@ h1{font-size:clamp(2.1rem,6.4vw,3.8rem);filter:drop-shadow(0 6px 30px rgba(124,9
   <label class="row"><input type="checkbox" id="opt-speak" checked> Speak responses aloud</label>
   <label class="row"><input type="checkbox" id="opt-contrast"> High contrast</label>
   <label class="row"><input type="checkbox" id="opt-auto"> Speak translations automatically</label>
-  <label class="row"><input type="checkbox" id="opt-wake" checked> Wake word: say “Orvex” first</label>
+  <label class="row"><input type="checkbox" id="opt-wake" checked> <span>Wake word: say “<span id="wake-disp">Orvex</span>” first</span></label>
+  <div class="row"><input id="wake-in" type="text" maxlength="30" style="flex:1;min-width:0;color:#111;background:#fff;border:0;border-radius:.7rem;padding:.5rem .7rem" placeholder="Your own wake word, e.g. Jarvis" autocomplete="off" aria-label="Custom wake word"><button id="wake-save" class="mini" type="button">Set</button><button id="wake-reset" class="mini" type="button">Reset</button></div>
+  <span class="note">Pick any name you like. Say it, then your command. It also works in the background on this computer.</span>
   <div id="key-box" class="keybox" hidden>
     <span class="note">Optional: free Gemini API key (aistudio.google.com/apikey) to unlock the AI tutor (any language, any sentence, with easy pronunciation) and ✨ Explain, Simplify and Replies. It is checked, then saved in a private .env file next to orvex.py on this computer (never uploaded).</span>
     <div class="row"><input id="key-in" type="password" placeholder="AIza…" autocomplete="off" aria-label="Gemini API key"><button id="key-save" class="mini" type="button">Save</button></div>
@@ -1487,19 +1489,19 @@ function handleVoice(t) {
   if (!norm || (norm === lastHandled && now - lastHandledAt < 3000)) return;   // the browser sometimes repeats a sentence after it restarts
   lastHandled = norm; lastHandledAt = now;
   if (!$("opt-wake").checked) { sendMessage(t); return; }
-  const m = t.match(WAKE_RE);
+  const m = wakeFind(t);
   if (m) {
-    const rest = t.slice(m.index + m[0].length).replace(/^[\s,.:;!?-]+/, "").trim();
+    const rest = t.slice(m.end).replace(/^[\s,.:;!?-]+/, "").trim();
     if (rest) { armedUntil = 0; sendMessage(rest); }
     else armWake();
   } else if (now < armedUntil) { armedUntil = 0; sendMessage(t); }
-  else heard.textContent = "Say “Orvex” first, then your command.";
+  else heard.textContent = "Say “" + wakeDisp() + "” first, then your command.";
 }
 function startListening() {
   recognition = new SpeechRec();
   recognition.lang = $("opt-lang").value;
   recognition.continuous = true; recognition.interimResults = true;
-  recognition.onstart = () => { recStartedAt = Date.now(); mic.classList.add("active"); Robot.setMood("listening", $("opt-wake").checked ? "Say “Orvex”, then your command" : "Listening… say a command"); };
+  recognition.onstart = () => { recStartedAt = Date.now(); mic.classList.add("active"); Robot.setMood("listening", $("opt-wake").checked ? "Say “" + wakeDisp() + "”, then your command" : "Listening… say a command"); };
   recognition.onresult = (e) => {
     if (window.__talking || ("speechSynthesis" in window && speechSynthesis.speaking)) return;
     let interim = "";
@@ -1509,7 +1511,7 @@ function startListening() {
     }
     if (interim) {
       heard.textContent = "Hearing: “" + interim + "”";
-      if ($("opt-wake").checked && Date.now() >= armedUntil && WAKE_RE.test(interim)) armWake();   // react the moment "Orvex" is heard, before the sentence ends
+      if ($("opt-wake").checked && Date.now() >= armedUntil && wakeFind(interim)) armWake();   // react the moment "Orvex" is heard, before the sentence ends
     }
   };
   recognition.onerror = (e) => {
@@ -1535,6 +1537,46 @@ mic.addEventListener("click", () => {
   if (wantListening) { stopListening(); return; }
   wantListening = true; startListening();
 });
+
+// ---------- custom wake word (the name you say before a command) ----------
+let WAKE_WORD = store.get("orvex-wakeword", "") || "orvex";
+const wakeNorm = (w) => String(w || "").replace(/[^\p{L}\p{M}\p{N}\s'-]/gu, " ").replace(/\s+/g, " ").trim().slice(0, 30);
+const wakeDisp = () => { const w = wakeNorm(WAKE_WORD) || "orvex"; return w.charAt(0).toUpperCase() + w.slice(1); };
+function lev(a, b) {
+  const d = Array.from({ length: a.length + 1 }, (_, i) => [i]);
+  for (let j = 1; j <= b.length; j++) d[0][j] = j;
+  for (let i = 1; i <= a.length; i++) for (let j = 1; j <= b.length; j++) d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+  return d[a.length][b.length];
+}
+function wakeFind(t) {   // returns {index, end} of the wake word inside what was heard, or null. Browsers mishear names, so close spellings count too.
+  const w = wakeNorm(WAKE_WORD).toLowerCase();
+  if (!w || w === "orvex") { const m = t.match(WAKE_RE); return m ? { index: m.index, end: m.index + m[0].length } : null; }
+  const esc = w.split(" ").map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("[\\s,.-]*");
+  const m = new RegExp("(?:^|[^\\p{L}\\p{M}\\p{N}])((?:(?:hey|hi|hello|ok|okay)\\s+)?" + esc + ")(?![\\p{L}\\p{M}\\p{N}])", "iu").exec(t);
+  if (m) return { index: m.index + m[0].indexOf(m[1]), end: m.index + m[0].length };
+  const toks = [...t.matchAll(/[^\s,.:;!?]+/gu)], n = w.split(" ").length, thr = w.length >= 7 ? 0.75 : (w.length >= 5 ? 0.8 : 0.85);
+  for (let i = 0; i + n <= toks.length; i++) {
+    const cand = toks.slice(i, i + n).map((x) => x[0].toLowerCase()).join(" ");
+    if (1 - lev(cand, w) / Math.max(cand.length, w.length) >= thr) { const last = toks[i + n - 1]; return { index: toks[i].index, end: last.index + last[0].length }; }
+  }
+  return null;
+}
+function paintWake() {
+  const d = $("wake-disp"); if (d) d.textContent = wakeDisp();
+  const i = $("wake-in"); if (i && document.activeElement !== i) i.value = wakeNorm(WAKE_WORD) === "orvex" ? "" : wakeNorm(WAKE_WORD);
+}
+async function setWakeWord(w, say) {
+  w = wakeNorm(w);
+  if (w.length < 2) w = "orvex";
+  WAKE_WORD = w; store.set("orvex-wakeword", w); paintWake();
+  try { await _fetch("/api/wake", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ word: w }) }); } catch (e) {}   // also tells the background listener
+  if (say) toast("Wake word is now “" + wakeDisp() + "”. Say it, then your command.", 3600);
+}
+$("wake-save").addEventListener("click", () => setWakeWord($("wake-in").value, true));
+$("wake-in").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); setWakeWord($("wake-in").value, true); } });
+$("wake-reset").addEventListener("click", () => { $("wake-in").value = ""; setWakeWord("orvex", true); });
+paintWake();
+_fetch("/api/wake").then((r) => r.ok ? r.json() : null).then((d) => { if (d && d.local && d.word && d.word !== WAKE_WORD) { WAKE_WORD = d.word; store.set("orvex-wakeword", d.word); paintWake(); } }).catch(() => {});
 
 // ---------- Wake word switch + QR on the home page ----------
 $("opt-wake").checked = store.get("orvex-wake", "1") === "1";
@@ -4149,7 +4191,7 @@ def chat():
     msg = (d.get("message") or "").strip()[:1000]
     if not msg:
         return jsonify(error="Say or type something first."), 400
-    plain = _WAKE_PREFIX.sub("", msg).strip() or msg
+    plain = _strip_wake(msg)
     # 1) "translate hello into Telugu": translated for real on the server (MyMemory, then Gemini), never faked
     m = _TR_INTENT.match(plain)
     if m:
@@ -4455,6 +4497,89 @@ WAKE_PY = re.compile(r"\b(?:(?:(?:hey|hi|hello|ok|okay)\s+)?(?:orvex|or\s?vex|or
 DESK = {"on": False, "port": 5000, "events": queue.Queue(), "cmds": [], "ping": 0.0, "visible": False,
         "last_wake": 0.0, "native": "", "quit": threading.Event()}
 _desk_lock = threading.Lock()
+
+# ----- custom wake word: the name the person says. Saved in orvex_wake.json so the page and the background listener agree -----
+WAKE_FILE = os.path.join(DATA_DIR, "orvex_wake.json")
+_WAKE_CACHE = {"mt": -1, "word": "orvex", "re": None}
+
+
+def wake_clean(w):
+    import unicodedata
+    w = "".join(ch if (ch.isalnum() or ch in "'-" or unicodedata.category(ch).startswith("M")) else " " for ch in str(w or ""))
+    w = re.sub(r"\s+", " ", w).strip()[:30]
+    return w if len(w) >= 2 else "orvex"
+
+
+def wake_word():
+    try:
+        mt = os.path.getmtime(WAKE_FILE)
+    except OSError:
+        mt = 0
+    if mt != _WAKE_CACHE["mt"]:
+        w = "orvex"
+        try:
+            with open(WAKE_FILE, encoding="utf-8") as f:
+                w = wake_clean(json.load(f).get("word"))
+        except (OSError, ValueError, AttributeError):
+            pass
+        rx = None
+        if w.lower() != "orvex":
+            toks = [re.escape(t) for t in w.lower().split()]
+            rx = re.compile(r"(?<!\w)(?:(?:hey|hi|hello|ok|okay)\s+)?" + r"[\s,.-]*".join(toks) + r"(?!\w)[\s,.:;!?-]*", re.I)
+        _WAKE_CACHE.update(mt=mt, word=w, re=rx)
+    return _WAKE_CACHE["word"]
+
+
+def wake_find(text):
+    """(start, end) of the wake word inside the text, or None. Close spellings count, because speech engines mishear names."""
+    text = text or ""
+    w = wake_word()
+    rx = _WAKE_CACHE["re"]
+    if rx is None:
+        m = WAKE_PY.search(text)
+        return (m.start(), m.end()) if m else None
+    m = rx.search(text)
+    if m:
+        return (m.start(), m.end())
+    import difflib
+    wl, n = w.lower(), len(w.split())
+    thr = 0.75 if len(wl) >= 7 else (0.8 if len(wl) >= 5 else 0.85)
+    toks = [(t.start(), t.end(), t.group().lower()) for t in re.finditer(r"[^\s,.:;!?]+", text)]
+    for i in range(len(toks) - n + 1):
+        if difflib.SequenceMatcher(None, " ".join(t[2] for t in toks[i:i + n]), wl).ratio() >= thr:
+            return (toks[i][0], toks[i + n - 1][1])
+    return None
+
+
+def _strip_wake(msg):
+    if wake_word().lower() == "orvex":
+        return _WAKE_PREFIX.sub("", msg).strip() or msg
+    f = wake_find(msg)
+    if f and f[0] <= 12:
+        return msg[f[1]:].strip(" ,.:;!?-") or msg
+    return _WAKE_PREFIX.sub("", msg).strip() or msg
+
+
+@app.get("/api/wake")
+def wake_get():
+    return jsonify(word=wake_word(), local=is_this_pc())
+
+
+@app.post("/api/wake")
+def wake_post():
+    if not is_this_pc():
+        return jsonify(error="The wake word is set on the computer where ORVEX runs."), 403
+    w = wake_clean((request.get_json(silent=True) or {}).get("word"))
+    tmp = WAKE_FILE + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"word": w}, f)
+        os.replace(tmp, WAKE_FILE)
+    except OSError:
+        return jsonify(error="Couldn't save the wake word."), 500
+    return jsonify(word=wake_word(), local=True)
+
+
 
 
 def _stop_overlay_safe():
@@ -4981,8 +5106,8 @@ class WakeDetector:
 
 def wake_check(text):
     """Returns None if the text does not contain the wake word, otherwise whatever command followed it ('' if none)."""
-    m = WAKE_PY.search(text or "")
-    return None if not m else (text[m.end():].strip(" ,.:;!?-"))
+    f = wake_find(text)
+    return None if not f else (text[f[1]:].strip(" ,.:;!?-"))
 
 
 def native_wake_loop(model_factory=None, stream_factory=None):
@@ -5010,8 +5135,8 @@ def native_wake_loop(model_factory=None, stream_factory=None):
         if seg is None:
             continue
         try:
-            parts, _ = model.transcribe(seg, language="en", beam_size=1, vad_filter=False, condition_on_previous_text=False,
-                                        initial_prompt="Hey Orvex.")
+            parts, _ = model.transcribe(seg, language=("en" if wake_word().isascii() else None), beam_size=1, vad_filter=False,
+                                        condition_on_previous_text=False, initial_prompt="Hey %s." % wake_word())
             text = " ".join(p.text for p in parts).strip()
         except Exception:
             continue
