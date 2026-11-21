@@ -1057,6 +1057,7 @@ h1{font-size:clamp(2.1rem,6.4vw,3.8rem);filter:drop-shadow(0 6px 30px rgba(124,9
     <label class="capopt">Speech engine <select id="cp-eng"><option value="auto">Automatic</option><option value="ai">AI (Gemini, most accurate)</option><option value="whisper">Local (Whisper, no limits)</option></select></label>
   </div>
   <label class="sw"><input type="checkbox" id="cp-orig"><i></i><span>Also show the original words</span></label>
+  <div class="row"><button id="cp-test" class="pill go" type="button">▶ Show a test caption now</button></div>
   <div class="capprev"><small>● LIVE &nbsp; Telugu → English</small><b>Hello everyone, let's start the meeting.</b><span>నమస్కారం అందరికీ, సమావేశాన్ని ప్రారంభిద్దాం.</span></div>
   <p class="note"><b>Tip:</b> drag the captions to move them. <b>Right-click</b> them for size, language, transparency and pause. <b>Ctrl + mouse wheel</b> changes the size. Audio is turned into text and thrown away, never saved.</p>
   <p class="note">Captions run on the computer where ORVEX is installed. The first launch installs what they need by itself (internet needed once).</p>
@@ -3085,6 +3086,7 @@ setTimeout(() => { if ("requestIdleCallback" in window) requestIdleCallback(() =
     busy = false; paint();
   }
   function poll() { clearTimeout(pollT); load().finally(() => { pollT = setTimeout(poll, $c("p-caps").hidden ? 5000 : 1500); }); }
+  $c("cp-test").addEventListener("click", () => { if (!st || !st.settings) return; if (!st.running) { toast("Captions are not running yet. Turn the switch on and wait a few seconds.", 4500); return; } save({ test: (st.settings.test || 0) + 1 }); toast("A test caption should appear on your screen.", 3000); });
   $c("cp-on").addEventListener("change", (e) => save({ on: e.target.checked }));
   tgt.addEventListener("change", () => save({ target: tgt.value }));
   $c("cp-size").addEventListener("change", (e) => save({ size: +e.target.value }));
@@ -5427,10 +5429,28 @@ import atexit
 
 LIVE_FILE = os.path.join(DATA_DIR, "orvex_live.json")
 LIVE_STATUS_FILE = os.path.join(DATA_DIR, "orvex_live_status.json")
-LIVE_DEFAULT = {"on": True, "target": "en", "size": 1, "opacity": 0.92, "show_original": True, "engine": "auto", "x": -1, "y": -1}
+LIVE_DEFAULT = {"on": True, "target": "en", "size": 1, "opacity": 0.92, "show_original": True, "engine": "auto", "x": -1, "y": -1, "test": 0}
 LIVE_SIZES = [("Small", 12), ("Medium", 15), ("Large", 20), ("Huge", 28)]
 LIVE_ENGINES = ("auto", "whisper", "ai")
-LIVE = {"proc": None, "t0": 0.0}
+LIVE = {"proc": None, "t0": 0.0, "tries": 0}
+LIVE_LOG = os.path.join(DATA_DIR, "orvex_captions.log")
+
+
+def _cap_log(msg):
+    try:
+        with open(LIVE_LOG, "a", encoding="utf-8") as f:
+            f.write("%s  %s\n" % (time.strftime("%H:%M:%S"), msg))
+    except OSError:
+        pass
+
+
+def _cap_log_last():
+    try:
+        with open(LIVE_LOG, encoding="utf-8") as f:
+            ln = [x.strip() for x in f.read().splitlines() if x.strip()]
+        return ln[-1][10:] if ln else ""
+    except OSError:
+        return ""
 _AI_BLOCK = {"until": 0.0}
 
 
@@ -5449,9 +5469,9 @@ def live_clean(d):
         o["opacity"] = 0.92
     o["show_original"] = bool(d.get("show_original", True))
     o["engine"] = d.get("engine") if d.get("engine") in LIVE_ENGINES else "auto"
-    for k in ("x", "y"):
+    for k in ("x", "y", "test"):
         try:
-            o[k] = int(d.get(k, -1))
+            o[k] = int(d.get(k, -1 if k != "test" else 0))
         except (TypeError, ValueError):
             o[k] = -1
     return o
@@ -5506,16 +5526,19 @@ def live_start():
     """Starts the floating captions. Returns (ok, message)."""
     if live_running():
         return True, "already running"
+    if LIVE["t0"] == 0.0 or time.time() - LIVE["t0"] > 120:
+        LIVE["tries"] = 0
     if not _tk_available():
         return False, "Live captions need Python's built-in tkinter."
     env = dict(os.environ)
     if AI_KEY:
         env["GEMINI_API_KEY"] = AI_KEY
     env["ORVEX_DATA"] = DATA_DIR
-    try:
-        os.remove(LIVE_STATUS_FILE)
-    except OSError:
-        pass
+    for fp in (LIVE_STATUS_FILE, LIVE_LOG):
+        try:
+            os.remove(fp)
+        except OSError:
+            pass
     try:
         LIVE["proc"] = subprocess.Popen([sys.executable, os.path.abspath(__file__), "--captions"], env=env)
         LIVE["t0"] = time.time()
@@ -5564,9 +5587,17 @@ def is_this_pc():
 def _live_payload():
     st = _live_status()
     running = live_running()
+    cfg = live_load()
     if running and not st:
         st = {"state": "starting", "msg": "Starting…"}
-    if not running and st.get("state") not in ("error",):
+    if not running and cfg["on"] and is_this_pc() and _tk_available() and LIVE["t0"] and time.time() - LIVE["t0"] > 6:
+        if LIVE["tries"] < 3:   # the captions program stopped by itself: start it again (up to 3 times)
+            LIVE["tries"] += 1
+            live_start()
+            st = {"state": "starting", "msg": "Restarting captions…"}
+        else:
+            st = {"state": "error", "msg": "Captions stopped: " + (_cap_log_last() or "unknown problem") + "  (details: orvex_captions.log)"}
+    elif not running and st.get("state") not in ("error",):
         st = {"state": "off", "msg": ""}
     return dict(settings=live_load(), local=is_this_pc(), available=_tk_available(), running=running, status=st,
                 sizes=[n for n, _ in LIVE_SIZES])
@@ -5693,7 +5724,7 @@ class CaptionSeg(object):
     def _frame(self, fr):
         np = self.np
         rms = float(np.sqrt(np.mean(fr * fr)))
-        loud = rms > max(0.006, self.noise * 2.5)
+        loud = rms > max(0.0025, self.noise * 3.0)
         if not loud and not self.buf:
             self.noise = 0.97 * self.noise + 0.03 * rms
         if loud:
@@ -5763,6 +5794,7 @@ def _caption_backend(np, uiq, cfg):
     segq, segmenter = queue.Queue(), CaptionSeg(np)
     uiq.put(("state", "starting", "Opening computer audio…"))
     stop, label = _open_audio(np, push)
+    _cap_log("audio: " + str(label))
     if stop is None:
         _live_status_write("error", label)
         uiq.put(("state", "error", label))
@@ -5770,7 +5802,17 @@ def _caption_backend(np, uiq, cfg):
     _live_status_write("listening", "", label)
     uiq.put(("state", "listening", label))
     if not AI_KEY or cfg.get("engine") == "whisper":
-        threading.Thread(target=lambda: get_whisper(), daemon=True).start()   # warm up the local speech model
+        def warm():
+            uiq.put(("state", "starting", "Getting the speech engine ready (first time only, 1-3 min)…"))
+            try:
+                get_whisper()
+                uiq.put(("state", "listening", label))
+            except Exception as exc:
+                _cap_log("speech engine: " + str(exc)[:200])
+                if not AI_KEY:
+                    _live_status_write("error", "No speech engine. Add a Gemini key in Settings, or install faster-whisper.")
+                    uiq.put(("state", "error", "No speech engine. Add a Gemini key in Settings."))
+        threading.Thread(target=warm, daemon=True).start()
     while True:
         item = segq.get()
         while segq.qsize() > 2:   # stay live: skip the oldest chunks if we fall behind
@@ -5784,6 +5826,7 @@ def _caption_backend(np, uiq, cfg):
         try:
             text, lang, tr = caption_transcribe(np, item, cfg)
         except Exception as exc:
+            _cap_log("transcribe: " + str(exc)[:200])
             uiq.put(("warn", str(exc)[:110]))
             continue
         if text:
@@ -5944,6 +5987,9 @@ class CaptionUI(object):
                     self.quit()
                     return
                 paused = self.cfg.get("paused", False)
+                if new.get("test", 0) != self.cfg.get("test", 0):
+                    self.lines = (self.lines + [{"text": "నమస్కారం! ఇది ఒక పరీక్ష.", "lang": "te", "tr": "Hello! This is a test caption.", "target": new["target"]}])[-2:]
+                    self.state, self.last = "listening", time.time()
                 self.cfg.update(new)
                 self.cfg["paused"] = paused
                 try:
@@ -6053,13 +6099,25 @@ def run_captions():
         import numpy as np
     except ImportError:
         np = None
-    ui = CaptionUI(tk, uiq, cfg)
+    try:
+        ui = CaptionUI(tk, uiq, cfg)
+    except Exception as exc:
+        _cap_log("window: " + str(exc)[:200])
+        _live_status_write("error", "Couldn't open the captions window: " + str(exc)[:80])
+        return 1
     if np is None:
         msg = "Live captions need numpy. Run:  python -m pip install numpy pyaudiowpatch"
         _live_status_write("error", msg)
         uiq.put(("state", "error", msg))
     else:
-        threading.Thread(target=_caption_backend, args=(np, uiq, cfg), daemon=True).start()
+        def safe():
+            try:
+                _caption_backend(np, uiq, cfg)
+            except Exception as exc:
+                _cap_log("backend crashed: " + repr(exc)[:200])
+                _live_status_write("error", "Captions problem: " + str(exc)[:90])
+                uiq.put(("state", "error", "Captions problem: " + str(exc)[:90]))
+        threading.Thread(target=safe, daemon=True).start()
     ui.run()
     return 0
 
