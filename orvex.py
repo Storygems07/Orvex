@@ -3003,7 +3003,7 @@ setTimeout(() => { if ("requestIdleCallback" in window) requestIdleCallback(() =
   const tgt = $c("cp-target");
   LANGS.forEach(([c, n]) => tgt.add(new Option(n, c)));
   let st = null, busy = false, pollT = 0;
-  const LOCAL_MSG = "Live captions run on the computer where ORVEX is installed. Open ORVEX there with: python orvex.py --app";
+  const LOCAL_MSG = "Live captions only work when ORVEX is running on your own computer (double-click Start_ORVEX.bat). On a website or phone they stay off.";
   function paint() {
     if (!st) return;
     const s = st.settings || {}, run = !!st.running, status = st.status || {};
@@ -5421,6 +5421,21 @@ def live_autostart():
 atexit.register(live_stop)
 
 
+def is_this_pc():
+    """True when the request comes from this same computer, even if the page was opened through the computer's own Wi-Fi address."""
+    if request.headers.get("X-Forwarded-For"):
+        return False
+    ra = request.remote_addr or ""
+    if ra in ("127.0.0.1", "::1") or ra.startswith("::ffff:127."):
+        return True
+    own = {lan_ip()}
+    try:
+        own.update(socket.gethostbyname_ex(socket.gethostname())[2])
+    except OSError:
+        pass
+    return ra in own or ra.replace("::ffff:", "") in own
+
+
 def _live_payload():
     st = _live_status()
     running = live_running()
@@ -5428,7 +5443,7 @@ def _live_payload():
         st = {"state": "starting", "msg": "Starting…"}
     if not running and st.get("state") not in ("error",):
         st = {"state": "off", "msg": ""}
-    return dict(settings=live_load(), local=is_local(), available=_tk_available(), running=running, status=st,
+    return dict(settings=live_load(), local=is_this_pc(), available=_tk_available(), running=running, status=st,
                 sizes=[n for n, _ in LIVE_SIZES])
 
 
@@ -5439,8 +5454,8 @@ def live_get():
 
 @app.post("/api/live/settings")
 def live_post():
-    if not is_local():
-        return jsonify(error="Live captions run on the computer where ORVEX is installed. Open ORVEX there (python orvex.py --app)."), 403
+    if not is_this_pc():
+        return jsonify(error="Live captions only work in ORVEX running on your own computer, not on a website or a phone."), 403
     d = request.get_json(silent=True) or {}
     new = live_save(dict(live_load(), **{k: v for k, v in d.items() if k in LIVE_DEFAULT}))
     if "on" in d:
