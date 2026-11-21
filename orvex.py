@@ -26,6 +26,50 @@ FEATURES
 Speech recognition runs locally (faster-whisper), OCR runs in the browser (Tesseract.js), only TEXT goes to the translation service.
 """
 
+# ---------------------------------------------------------------------------
+# AUTO SETUP: the first time ORVEX runs on a computer it installs what it needs by itself (needs internet once).
+# Nobody has to run "--setup". Set ORVEX_NO_AUTOSETUP=1 to switch this off.
+# ---------------------------------------------------------------------------
+def _auto_setup():
+    import importlib
+    import importlib.util
+    import subprocess
+    import sys
+    import time as _t
+    import os as _os
+    if __name__ != "__main__" or _os.environ.get("ORVEX_NO_AUTOSETUP"):
+        return
+    core = [("flask", "flask"), ("langdetect", "langdetect"), ("PIL", "pillow"), ("edge_tts", "edge-tts")]
+    extra = [("numpy", "numpy"), ("faster_whisper", "faster-whisper"), ("sounddevice", "sounddevice")]
+    extra.append(("pyaudiowpatch", "pyaudiowpatch") if _os.name == "nt" else ("soundcard", "soundcard"))
+    miss_core = [p for m, p in core if importlib.util.find_spec(m) is None]
+    miss_extra = [p for m, p in extra if importlib.util.find_spec(m) is None]
+    stamp = _os.path.join(_os.environ.get("ORVEX_DATA") or _os.path.dirname(_os.path.abspath(__file__)), ".orvex_setup_try")
+    try:
+        recent = _t.time() - _os.path.getmtime(stamp) < 6 * 3600   # don't keep retrying optional packages on every launch
+    except OSError:
+        recent = False
+    todo = miss_core + ([] if recent else miss_extra)
+    if not todo:
+        return
+    print("ORVEX: first-time setup, installing: " + ", ".join(todo) + "  (one time only, please wait...)")
+    base = [sys.executable, "-m", "pip", "install", "--disable-pip-version-check", "-q", "--retries", "1", "--timeout", "10"]
+    if subprocess.call(base + todo):
+        for pkg in todo:   # one by one, so a single failure does not block the rest
+            subprocess.call(base + [pkg])
+    try:
+        open(stamp, "w").write(str(_t.time()))
+    except OSError:
+        pass
+    importlib.invalidate_caches()
+    if importlib.util.find_spec("flask") is None:   # Flask is the only must-have; everything else has a fallback
+        print("ORVEX could not install its basic packages. Connect to the internet and run it again.")
+        sys.exit(1)
+    print("ORVEX: setup finished.")
+
+
+_auto_setup()
+
 import html
 import io
 import json
@@ -1013,7 +1057,7 @@ h1{font-size:clamp(2.1rem,6.4vw,3.8rem);filter:drop-shadow(0 6px 30px rgba(124,9
   <label class="sw"><input type="checkbox" id="cp-orig"><i></i><span>Also show the original words</span></label>
   <div class="capprev"><small>● LIVE &nbsp; Telugu → English</small><b>Hello everyone, let's start the meeting.</b><span>నమస్కారం అందరికీ, సమావేశాన్ని ప్రారంభిద్దాం.</span></div>
   <p class="note"><b>Tip:</b> drag the captions to move them. <b>Right-click</b> them for size, language, transparency and pause. <b>Ctrl + mouse wheel</b> changes the size. Audio is turned into text and thrown away, never saved.</p>
-  <p class="note">Captions run on the computer where ORVEX is installed. First time on Windows: <b>python orvex.py --setup</b> installs what they need.</p>
+  <p class="note">Captions run on the computer where ORVEX is installed. The first launch installs what they need by itself (internet needed once).</p>
 </section>
 <section id="p-welcome" class="panel welcome" hidden>
   <div class="panel-head" style="width:100%"><span></span><button class="x" data-close aria-label="Close">×</button></div>
