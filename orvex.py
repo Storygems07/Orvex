@@ -7,6 +7,7 @@ ONE FILE, EVERYTHING INSIDE.
   python orvex.py --app       desktop mode: a floating orb on your screen + the ORVEX window + background "Hey Orvex"
   python orvex.py --app --background   orb only (no window), "Hey Orvex" brings everything back
   python orvex.py --install-desktop    Windows: start the orb with the computer + desktop shortcut (--uninstall-desktop removes it)
+  python orvex.py --captions  only the floating live captions (they also start by themselves, you can turn them off in the app)
   python orvex.py --export    writes requirements.txt, Dockerfile and README.md for online hosting (Hugging Face Spaces / Render)
 
 FEATURES
@@ -130,7 +131,7 @@ def _secret_key():
 
 
 app.secret_key = _secret_key()
-app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax", PERMANENT_SESSION_LIFETIME=60 * 60 * 24 * 30)
+app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax", PERMANENT_SESSION_LIFETIME=60 * 60 * 24 * 365)
 
 
 def db():
@@ -144,6 +145,7 @@ def init_db():
     try:
         c.execute("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, "
                   "email TEXT NOT NULL UNIQUE, pw TEXT NOT NULL, created REAL NOT NULL)")
+        c.execute("CREATE TABLE IF NOT EXISTS remember (th TEXT PRIMARY KEY, uid INTEGER NOT NULL, created REAL NOT NULL)")
         c.commit()
     finally:
         c.close()
@@ -182,7 +184,7 @@ def current_user():
 
 # "/api/overlay/poll" is open to the login check because the floating window (a separate local program)
 # has no browser session; it is protected by a random per-run token and only answers this computer.
-OPEN_API = {"/api/health", "/api/config", "/api/me", "/api/login", "/api/signup", "/api/logout", "/api/lan-url", "/api/overlay/poll"}
+OPEN_API = {"/api/health", "/api/config", "/api/me", "/api/login", "/api/signup", "/api/logout", "/api/lan-url", "/api/overlay/poll", "/api/restore"}
 
 
 @app.before_request
@@ -216,6 +218,7 @@ def signup():
     session.clear()
     session["uid"] = uid
     session.permanent = True
+    _link_device(uid, d.get("device"))
     return jsonify(user={"name": name, "email": email})
 
 
@@ -239,6 +242,7 @@ def login():
     session.clear()
     session["uid"] = row["id"]
     session.permanent = True
+    _link_device(row["id"], d.get("device"))
     return jsonify(user={"name": row["name"], "email": row["email"]})
 
 
@@ -248,8 +252,86 @@ def me():
     return jsonify(user={"name": u["name"], "email": u["email"]} if u else None)
 
 
+def _dev_hash(tok):
+    import hashlib
+    return hashlib.sha256(("orvex-device|" + str(tok)).encode("utf-8")).hexdigest()
+
+
+def _dev_ok(tok):
+    return isinstance(tok, str) and 24 <= len(tok) <= 100
+
+
+def _link_device(uid, tok):
+    """Remembers this browser/device so the person never has to sign in again (even if the host restarts)."""
+    if not _dev_ok(tok):
+        return
+    c = db()
+    try:
+        c.execute("INSERT OR REPLACE INTO remember (th, uid, created) VALUES (?, ?, ?)", (_dev_hash(tok), uid, time.time()))
+        c.commit()
+    except sqlite3.Error:
+        pass
+    finally:
+        c.close()
+
+
+@app.post("/api/remember")
+def remember_route():
+    u = current_user()
+    d = request.get_json(silent=True) or {}
+    if u:
+        _link_device(u["id"], d.get("device"))
+    return jsonify(ok=bool(u))
+
+
+@app.post("/api/restore")
+def restore():
+    """Signs a known device back in. If the server's user file was wiped (free hosting does that), the account is rebuilt for this device."""
+    d = request.get_json(silent=True) or {}
+    tok = d.get("device")
+    if not _dev_ok(tok):
+        return jsonify(user=None), 401
+    key = (request.remote_addr or "") + "|restore"
+    if _locked(key):
+        return jsonify(user=None), 429
+    c = db()
+    try:
+        r = c.execute("SELECT u.id, u.name, u.email FROM remember r JOIN users u ON u.id = r.uid WHERE r.th = ?", (_dev_hash(tok),)).fetchone()
+        if not r:
+            email = (d.get("email") or "").strip().lower()[:120]
+            name = (d.get("name") or "").strip()[:60]
+            if EMAIL_RE.match(email) and name and not c.execute("SELECT 1 FROM users WHERE email=?", (email,)).fetchone():
+                c.execute("INSERT INTO users (name, email, pw, created) VALUES (?, ?, ?, ?)",
+                          (name, email, generate_password_hash(secrets.token_hex(16)), time.time()))
+                uid = c.execute("SELECT id FROM users WHERE email=?", (email,)).fetchone()["id"]
+                c.execute("INSERT OR REPLACE INTO remember (th, uid, created) VALUES (?, ?, ?)", (_dev_hash(tok), uid, time.time()))
+                c.commit()
+                r = {"id": uid, "name": name, "email": email}
+    except sqlite3.Error:
+        r = None
+    finally:
+        c.close()
+    if not r:
+        _fail(key)
+        return jsonify(user=None), 401
+    session.clear()
+    session["uid"] = r["id"]
+    session.permanent = True
+    return jsonify(user={"name": r["name"], "email": r["email"]})
+
+
 @app.post("/api/logout")
 def logout():
+    d = request.get_json(silent=True) or {}
+    if _dev_ok(d.get("device")):
+        c = db()
+        try:
+            c.execute("DELETE FROM remember WHERE th=?", (_dev_hash(d.get("device")),))
+            c.commit()
+        except sqlite3.Error:
+            pass
+        finally:
+            c.close()
     session.clear()
     return jsonify(ok=True)
 
@@ -269,8 +351,6 @@ HTML = r"""<!DOCTYPE html>
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="icon" href="/icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="/icon.png">
-<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.4/build/qrcode.min.js"></script>
 <style>
 @property --ang{syntax:"<angle>";initial-value:0deg;inherits:false}
 :root{--s:1;--bg:#04030c;--ink:#f3f2ff;--mut:#aeabdc;--glass:rgba(255,255,255,.065);--glass2:rgba(255,255,255,.12);--line:rgba(255,255,255,.15);--a:#7c5cff;--b:#22d3ee;--c:#f472b6;--ok:#34d399}
@@ -637,8 +717,98 @@ h1{background-size:220% 100%;animation:hue5 9s ease-in-out infinite alternate}
 #mini-menu .mm-t small{color:var(--mut);font-size:.76rem}
 </style>
 
+<style>
+/* ORVEX_V6: cinematic intro, richer design, tour, live captions panel */
+#intro{position:fixed;inset:0;z-index:300;background:#01010a;overflow:hidden;transition:opacity .75s ease,transform .95s cubic-bezier(.7,0,.2,1)}
+#intro.out{opacity:0;transform:scale(1.18);pointer-events:none}
+#intro canvas{position:absolute;inset:0;width:100%;height:100%}
+.in-glow{position:absolute;left:50%;top:50%;width:95vmax;height:95vmax;margin:-47.5vmax 0 0 -47.5vmax;background:radial-gradient(circle,rgba(56,120,255,.38),rgba(124,92,255,.12) 40%,transparent 62%);opacity:0;transition:opacity 1.3s ease,transform 1.8s ease}
+#intro.cam .in-glow{opacity:1;transform:translateY(-6vmax) scale(1.1)}
+.in-vig{position:absolute;inset:0;background:radial-gradient(ellipse at center,transparent 38%,rgba(1,1,10,.88) 100%);pointer-events:none}
+.in-title{position:absolute;left:0;right:0;top:46%;transform:translateY(-50%);display:flex;justify-content:center;font-size:clamp(3.4rem,14vw,9.5rem);font-weight:800;line-height:1;letter-spacing:.14em;margin-right:-.14em;pointer-events:none}
+.in-title span{display:inline-block;opacity:0;transform:translateY(-140px) scale(1.35);filter:blur(20px);background:linear-gradient(180deg,#fff 10%,#a5f3fc 55%,#7c5cff);-webkit-background-clip:text;background-clip:text;color:transparent;padding-right:.14em}
+#intro.title .in-title span{animation:inLetter 1.15s cubic-bezier(.2,.85,.2,1) forwards;animation-delay:calc(var(--i)*.09s)}
+@keyframes inLetter{60%{filter:blur(2px)}to{opacity:1;transform:none;filter:blur(0) drop-shadow(0 0 22px rgba(103,232,249,.55))}}
+.in-sub{position:absolute;left:0;right:0;top:calc(46% + clamp(2.4rem,8vw,5.4rem));text-align:center;color:#aeabdc;letter-spacing:.42em;text-transform:uppercase;font-size:clamp(.62rem,1.7vw,.95rem);opacity:0;transition:opacity 1s ease .7s;pointer-events:none}
+#intro.title .in-sub{opacity:1}
+.in-star{position:absolute;left:50%;top:46%;width:0;height:0;display:none;pointer-events:none}
+.in-star i{position:absolute;left:0;top:0;transform:translate(-50%,-50%)}
+.in-star .c{width:34px;height:34px;border-radius:50%;background:radial-gradient(circle,#fff 0,#bae6fd 34%,rgba(56,189,248,.5) 60%,transparent 72%);box-shadow:0 0 60px 22px rgba(56,189,248,.85)}
+.in-star .h{width:min(72vw,580px);height:3px;background:linear-gradient(90deg,transparent,#7dd3fc,#fff,#7dd3fc,transparent)}
+.in-star .v{height:min(52vh,400px);width:3px;background:linear-gradient(180deg,transparent,#7dd3fc,#fff,#7dd3fc,transparent)}
+.in-star .d1,.in-star .d2{width:min(34vw,280px);height:2px;background:linear-gradient(90deg,transparent,#93c5fd,#fff,#93c5fd,transparent)}
+.in-star .d1{transform:translate(-50%,-50%) rotate(45deg)}.in-star .d2{transform:translate(-50%,-50%) rotate(-45deg)}
+#intro.star .in-star{display:block;animation:starIn 1.3s ease-out forwards}
+@keyframes starIn{0%{transform:scale(0) rotate(-30deg);opacity:0}18%{transform:scale(1.15) rotate(0);opacity:1}32%{transform:scale(.5);opacity:.7}46%{transform:scale(1.2);opacity:1}60%{transform:scale(.55);opacity:.75}78%{transform:scale(1.55);opacity:1}100%{transform:scale(2.8) rotate(12deg);opacity:0}}
+.in-flash{position:absolute;inset:0;background:radial-gradient(circle at 50% 46%,#fff,#7dd3fc 30%,transparent 70%);opacity:0;pointer-events:none}
+#intro.star .in-flash{animation:inFlash 1.3s ease-out forwards}
+@keyframes inFlash{0%,62%{opacity:0}86%{opacity:.95}100%{opacity:0}}
+#in-skip{position:absolute;right:1.2rem;bottom:1.2rem;z-index:2;padding:.45rem 1rem;border-radius:999px;border:1px solid rgba(255,255,255,.25);background:rgba(255,255,255,.06);color:#cfd0ff;font-size:.82rem;letter-spacing:.08em;backdrop-filter:blur(8px)}
+#in-skip:hover{background:rgba(255,255,255,.14)}
+
+/* entrance after the intro */
+html.app-in .orbwrap{animation:orbPop 1s cubic-bezier(.2,1.2,.3,1) both}
+html.app-in .hero h1,html.app-in .hero .sub{animation:rise6 .8s ease .15s both}
+html.app-in .quick{animation:rise6 .8s ease .3s both}
+html.app-in .card{animation:rise6 .8s ease both}
+html.app-in .card:nth-child(1){animation-delay:.4s}html.app-in .card:nth-child(2){animation-delay:.46s}html.app-in .card:nth-child(3){animation-delay:.52s}
+html.app-in .card:nth-child(4){animation-delay:.58s}html.app-in .card:nth-child(5){animation-delay:.64s}html.app-in .card:nth-child(6){animation-delay:.7s}html.app-in .card:nth-child(7){animation-delay:.76s}
+@keyframes rise6{from{opacity:0;transform:translateY(26px)}}
+@keyframes orbPop{from{opacity:0;transform:scale(.4);filter:blur(10px)}}
+
+/* richer look */
+.bg::before{content:"";position:absolute;inset:-20%;background:conic-gradient(from 0deg at 50% 40%,rgba(124,92,255,.0),rgba(34,211,238,.18),rgba(244,114,182,.0),rgba(124,92,255,.16),rgba(124,92,255,.0));filter:blur(70px);animation:spin 40s linear infinite;opacity:.8}
+header{background:linear-gradient(rgba(4,3,12,.82),rgba(4,3,12,.2));border-bottom:1px solid rgba(255,255,255,.05)}
+.logo{text-shadow:0 0 30px rgba(103,232,249,.35)}
+h1{font-size:clamp(2.1rem,6.4vw,3.8rem);filter:drop-shadow(0 6px 30px rgba(124,92,255,.35))}
+.orbwrap::before,.orbwrap::after{content:"";position:absolute;inset:-16%;border-radius:50%;border:1px dashed rgba(165,243,252,.28);animation:spin 26s linear infinite;pointer-events:none}
+.orbwrap::after{inset:-30%;border:1px solid rgba(124,92,255,.22);border-top-color:rgba(34,211,238,.7);animation-duration:12s;animation-direction:reverse}
+.orb{box-shadow:0 0 90px rgba(124,92,255,.65),0 0 170px rgba(34,211,238,.25),inset 0 0 50px rgba(34,211,238,.28)}
+.card{box-shadow:0 14px 40px rgba(0,0,0,.35),inset 0 1px 0 rgba(255,255,255,.07)}
+.card .ico{box-shadow:0 0 24px var(--g,rgba(124,92,255,.35));background:linear-gradient(145deg,rgba(255,255,255,.14),rgba(255,255,255,.03))}
+.card:hover{transform:translateY(-8px) scale(1.015)}
+.pill.go{box-shadow:0 8px 30px rgba(124,92,255,.55),0 0 0 1px rgba(255,255,255,.12) inset}
+.quick{border-color:rgba(34,211,238,.25);box-shadow:0 20px 70px rgba(0,0,0,.4),0 0 80px rgba(124,92,255,.18)}
+.composer{box-shadow:0 0 0 2px #e4b9f5,0 0 54px 10px rgba(167,139,250,.55)}
+::-webkit-scrollbar{width:10px;height:10px}::-webkit-scrollbar-thumb{background:rgba(165,180,252,.28);border-radius:8px}::-webkit-scrollbar-track{background:transparent}
+#caps-chip{display:inline-flex;align-items:center;gap:.45rem;font-size:.78rem;font-weight:700;padding:.25rem .8rem;border-radius:999px;border:1px solid var(--line);background:var(--glass);color:var(--mut);cursor:pointer}
+#caps-chip.on{color:#67e8f9;border-color:rgba(34,211,238,.55);box-shadow:0 0 18px rgba(34,211,238,.25)}
+#caps-chip.on::before{content:"";width:8px;height:8px;border-radius:50%;background:#22d3ee;box-shadow:0 0 10px #22d3ee;animation:blinkdot 1.1s infinite}
+.capst.err{color:#fca5a5}.capst.ok{color:#6ee7b7}.capst.warn{color:#fcd34d}
+.capgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:.7rem}
+.capprev{padding:.9rem 1.1rem;border-radius:1.2rem;background:rgba(7,11,28,.9);border:1px solid rgba(34,211,238,.45);box-shadow:0 0 30px rgba(34,211,238,.2);position:relative;overflow:hidden}
+.capprev::before{content:"";position:absolute;left:0;right:0;top:0;height:3px;background:linear-gradient(90deg,#7c5cff,#22d3ee)}
+.capprev small{color:#22d3ee;font-weight:700;letter-spacing:.08em}
+.capprev b{display:block;font-size:1.15rem;margin:.2rem 0}
+.capprev span{color:#7f8fb0;font-size:.8rem}
+
+/* guided tour */
+#tour-block{position:fixed;inset:0;z-index:249}
+#tour-spot{position:fixed;z-index:250;border-radius:18px;pointer-events:none;box-shadow:0 0 0 9999px rgba(3,2,15,.8),0 0 0 2px #22d3ee,0 0 44px rgba(34,211,238,.6);transition:all .4s cubic-bezier(.3,.8,.2,1)}
+#tour-card{position:fixed;z-index:251;width:min(380px,92vw);padding:1.1rem 1.2rem;border-radius:1.4rem;background:rgba(13,11,36,.97);border:1px solid rgba(165,243,252,.35);box-shadow:0 24px 70px rgba(0,0,0,.65),0 0 40px rgba(124,92,255,.3);display:flex;flex-direction:column;gap:.6rem;transition:left .4s,top .4s;animation:pop .25s}
+#tour-card h3{font-size:1.15rem;background:linear-gradient(90deg,#fff,#67e8f9);-webkit-background-clip:text;background-clip:text;color:transparent}
+#tour-card p{color:var(--mut);line-height:1.5;font-size:.95rem}
+#tour-card .tdots{display:flex;gap:.3rem}
+#tour-card .tdots i{width:8px;height:8px;border-radius:50%;background:rgba(255,255,255,.2)}
+#tour-card .tdots i.on{background:linear-gradient(135deg,var(--a),var(--b));width:20px;border-radius:6px}
+#tour-card .trow{display:flex;justify-content:space-between;align-items:center;gap:.5rem}
+@media(max-width:700px){#tour-btn span{display:none}}
+</style><style>
+.capopt{display:flex;flex-direction:column;gap:.3rem;font-size:.8rem;color:var(--mut)}
+.capopt select{width:100%}
+</style>
 </head>
 <body>
+<div id="intro" aria-hidden="true">
+  <div class="in-glow"></div>
+  <canvas id="intro-cv"></canvas>
+  <div class="in-vig"></div>
+  <div class="in-title" id="in-title"><span style="--i:0">O</span><span style="--i:1">R</span><span style="--i:2">V</span><span style="--i:3">E</span><span style="--i:4">X</span></div>
+  <div class="in-sub">Any language · Instantly understood</div>
+  <div class="in-star"><i class="c"></i><i class="h"></i><i class="v"></i><i class="d1"></i><i class="d2"></i></div>
+  <div class="in-flash"></div>
+  <button id="in-skip" type="button">Skip ›</button>
+</div>
 <div class="bg"><i></i><i></i><i></i></div>
 <canvas id="stars" aria-hidden="true"></canvas>
 
@@ -649,6 +819,8 @@ h1{background-size:220% 100%;animation:hue5 9s ease-in-out infinite alternate}
     <button id="user-btn" class="ib" hidden title="Account">👤 <span id="user-name"></span></button>
     <button id="install-btn" class="ib" hidden title="Install ORVEX as an app">⬇ <span>Install</span></button>
     
+    <button id="caps-chip" type="button" title="Live captions for computer audio">Captions</button>
+    <button id="tour-btn" class="ib" title="Guided tour: how ORVEX works">🧭 <span>Tour</span></button>
     <button id="help-btn" class="ib" title="How to use ORVEX" aria-label="Help">❓ <span>Help</span></button>
     <button id="phone-btn" class="ib" title="Open on your phone">📱 <span>Phone</span></button>
     <button id="size-btn" class="ib" title="Change text size" aria-label="Change text size">Aa</button>
@@ -662,6 +834,7 @@ h1{background-size:220% 100%;animation:hue5 9s ease-in-out infinite alternate}
 <div id="settings" class="settings" hidden>
   <h3>Settings</h3>
   <button id="pal-open" class="pill go" type="button">⌘ Command Palette (Ctrl + K)</button>
+  <label class="row"><input type="checkbox" id="opt-caps" checked> Live captions (computer audio)</label>
   <label class="row"><input type="checkbox" id="opt-speak" checked> Speak responses aloud</label>
   <label class="row"><input type="checkbox" id="opt-contrast"> High contrast</label>
   <label class="row"><input type="checkbox" id="opt-auto"> Speak translations automatically</label>
@@ -690,7 +863,7 @@ h1{background-size:220% 100%;animation:hue5 9s ease-in-out infinite alternate}
 </div>
 
 <!-- Sign in / Sign up -->
-<div id="auth" class="authwrap" role="dialog" aria-modal="true" aria-label="Sign in">
+<div id="auth" class="authwrap" hidden role="dialog" aria-modal="true" aria-label="Sign in">
   <div class="authcard">
     <span class="logo">orvex</span>
     <p class="note" style="text-align:center">Sign in to use ORVEX. New here? Create a free account.</p>
@@ -825,6 +998,23 @@ h1{background-size:220% 100%;animation:hue5 9s ease-in-out infinite alternate}
 </section>
 
 <!-- Welcome / how it works -->
+<!-- Live captions (computer audio) -->
+<section id="p-caps" class="panel" hidden>
+  <div class="panel-head"><h2>Live captions</h2><button class="x" data-close aria-label="Close">×</button></div>
+  <ol class="steps"><li>Leave this <b>ON</b>. Small captions float on your screen</li><li>Play any video, Zoom call or meeting. ORVEX hears the computer's sound</li><li>It names the language and shows it in the language you choose</li></ol>
+  <label class="sw" style="font-size:1rem;color:var(--ink)"><input type="checkbox" id="cp-on"><i></i><span><b>Live captions</b> (always on unless you turn them off)</span></label>
+  <p id="cp-status" class="note capst"></p>
+  <div class="capgrid">
+    <label class="capopt">Translate captions into <select id="cp-target"></select></label>
+    <label class="capopt">Text size <select id="cp-size"><option value="0">Small</option><option value="1">Medium</option><option value="2">Large</option><option value="3">Huge</option></select></label>
+    <label class="capopt">Transparency <input type="range" id="cp-op" min="0.4" max="1" step="0.05" value="0.92"></label>
+    <label class="capopt">Speech engine <select id="cp-eng"><option value="auto">Automatic</option><option value="ai">AI (Gemini, most accurate)</option><option value="whisper">Local (Whisper, no limits)</option></select></label>
+  </div>
+  <label class="sw"><input type="checkbox" id="cp-orig"><i></i><span>Also show the original words</span></label>
+  <div class="capprev"><small>● LIVE &nbsp; Telugu → English</small><b>Hello everyone, let's start the meeting.</b><span>నమస్కారం అందరికీ, సమావేశాన్ని ప్రారంభిద్దాం.</span></div>
+  <p class="note"><b>Tip:</b> drag the captions to move them. <b>Right-click</b> them for size, language, transparency and pause. <b>Ctrl + mouse wheel</b> changes the size. Audio is turned into text and thrown away, never saved.</p>
+  <p class="note">Captions run on the computer where ORVEX is installed. First time on Windows: <b>python orvex.py --setup</b> installs what they need.</p>
+</section>
 <section id="p-welcome" class="panel welcome" hidden>
   <div class="panel-head" style="width:100%"><span></span><button class="x" data-close aria-label="Close">×</button></div>
   <h2>Welcome to ORVEX</h2>
@@ -834,6 +1024,7 @@ h1{background-size:220% 100%;animation:hue5 9s ease-in-out infinite alternate}
     <li><b>Or just say it.</b> Press the microphone and say “Orvex, read my screen”.</li>
     <li><b>Hear the answer.</b> I read translations aloud. The <b>Aa</b> button makes everything bigger.</li>
   </ol>
+  <button id="welcome-tour" class="pill" type="button">🧭 Take the guided tour</button>
   <button id="welcome-go" class="pill go big" type="button">Let's start</button>
 </section>
 
@@ -978,6 +1169,11 @@ h1{background-size:220% 100%;animation:hue5 9s ease-in-out infinite alternate}
       <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#93c5fd" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12v0M7 8v8M11 4v16M15 7v10M19 10v4M22 12v0"/></svg></div>
       <b>Translate tab audio</b><span class="d">Videos, lessons and meetings playing in another tab, turned into words you understand.</span><span class="go">Start listening</span>
     </button>
+<button class="card" id="c-caps" style="--g:rgba(34,211,238,.5);--g2:#22d3ee">
+      <i class="tag" id="caps-tag">OFF</i>
+      <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#67e8f9" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="M8 11h2.5M8 15h5M14.5 11H16M16 15h0"/></svg></div>
+      <b>Live captions</b><span class="d">Hears any video, Zoom call or meeting on this computer and shows small futuristic captions: the language, and your translation, instantly.</span><span class="go">Open settings</span>
+    </button>
     <button class="card" id="c-phone" style="--g:rgba(52,211,153,.35);--g2:#34d399">
       <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#6ee7b7" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="2" width="10" height="20" rx="2.5"/><path d="M11 18h2"/></svg></div>
       <b>Get it on your phone</b><span class="d">Scan a code and install ORVEX like an app. No store needed.</span><span class="go">Show QR code</span>
@@ -1028,7 +1224,7 @@ const _fetch = window.fetch.bind(window);
 window.fetch = async (...a) => {   // any "please sign in" answer from the server brings the sign-in screen back
   const r = await _fetch(...a);
   const u = String(a[0] && a[0].url ? a[0].url : a[0]);
-  if (r.status === 401 && !/\/api\/(login|signup)/.test(u)) showAuth();
+  if (r.status === 401 && !/\/api\/(login|signup|restore|logout)/.test(u)) { if (await tryRestore()) return _fetch(...a); showAuth(); }
   return r;
 };
 let me = null, authMode = "in";
@@ -1055,7 +1251,7 @@ $("tab-up").addEventListener("click", () => setAuthMode("up"));
 $("auth-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const up = authMode === "up", err = $("auth-err"); err.textContent = "";
-  const body = { email: $("au-email").value, password: $("au-pass").value };
+  const body = { email: $("au-email").value, password: $("au-pass").value, device: deviceToken() };
   if (up) body.name = $("au-name").value;
   $("au-go").disabled = true;
   try {
@@ -1068,10 +1264,11 @@ $("auth-form").addEventListener("submit", async (e) => {
 });
 $("user-btn").addEventListener("click", async () => {
   if (!confirm("Sign out of ORVEX?")) return;
-  try { await _fetch("/api/logout", { method: "POST" }); } catch (e) {}
+  try { await _fetch("/api/logout", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ device: deviceToken() }) }); } catch (e) {}
+  try { localStorage.removeItem("orvex-profile"); localStorage.removeItem("orvex-device"); } catch (e) {}
   showAuth();
 });
-_fetch("/api/me").then((r) => r.json()).then((d) => { if (d.user) onUser(d.user); else showAuth(); }).catch(() => {});
+// (sign-in check now runs in the V6 boot code at the bottom, so a remembered login opens instantly)
 
 // ---------- Robot (orb) ----------
 const Robot = (() => {
@@ -1181,6 +1378,8 @@ function runAction(c) {   // the ONLY things a chat reply can trigger: every nam
   if (c === "open_learn" && window.orvexSetMode) window.orvexSetMode("learn");
   if (c === "open_translate" && window.orvexSetMode) window.orvexSetMode("translate");
   if (c === "float_orb" && window.orvexFloatOrb) window.orvexFloatOrb(true);
+  if (c === "caps_on" && window.orvexSetCaps) window.orvexSetCaps(true);
+  if (c === "caps_off" && window.orvexSetCaps) window.orvexSetCaps(false);
 }
 async function sendMessage(text) {
   text = (text || "").trim();
@@ -1399,7 +1598,7 @@ async function processCanvas(c) {
       catch (e) { setStatus("AI reading didn't work (" + e.message + "). Trying the built-in reader…"); }
     }
     if (!aiDone) {
-      if (typeof Tesseract === "undefined") throw new Error("Neither AI reading nor the OCR library is available. Check your internet connection and refresh the page.");
+      try { await ensureTess(); } catch (e) { throw new Error("Neither AI reading nor the OCR library is available. Check your internet connection and refresh the page."); }
       setStatus("Reading text… (the first time it downloads language data, so it can take a while)");
       const worker = await Tesseract.createWorker($("opt-ocr").value, 1, {
         logger: (m) => { if (m.status === "recognizing text") setStatus("Reading text… " + Math.round(m.progress * 100) + "%"); }
@@ -1725,7 +1924,7 @@ function lensStop() {
 }
 async function lensLoop() {
   const st = $("lens-status"), v = $("lens-video");
-  if (typeof Tesseract === "undefined") { st.textContent = "The text-reading library didn't load. Check your internet and refresh."; return; }
+  try { await ensureTess(); } catch (e) { st.textContent = "The text-reading library didn't load. Check your internet and refresh."; return; }
   const mySeq = ++lens.seq;
   try { const w = await Tesseract.createWorker($("opt-ocr").value, 1, {}); if (!lens.on || mySeq !== lens.seq) { w.terminate().catch(() => {}); return; } lens.worker = w; }
   catch (e) { st.textContent = "Couldn't start the reader: " + e.message; return; }
@@ -1795,7 +1994,7 @@ $("lab-run").addEventListener("click", async () => {
 
 // ---------- Live audio (tab or system sound -> Whisper on this computer -> translation) ----------
 const live = { on: false, paused: false, full: null, stream: null, ctx: null, an: null, rec: null, timer: null, meter: null, peak: 0, chain: Promise.resolve(), warmed: false, ovl: false };
-const LIVE_MS = 8000;
+const LIVE_MS = 3000;
 const LIVE_MIME = (window.MediaRecorder && ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus", "audio/mp4"].find((m) => MediaRecorder.isTypeSupported(m))) || "";
 { const s = $("live-src"); s.add(new Option("Detect automatically", "auto"), 0); LANGS.forEach(([c, n]) => s.add(new Option(n, c))); s.value = "auto"; }
 function setLive(t) { $("live-status").textContent = t; }
@@ -1951,6 +2150,7 @@ $("phone-btn").addEventListener("click", () => openPhone());
 $("help-btn").addEventListener("click", () => openHelp());
 $("welcome-go").addEventListener("click", () => { store.set("orvex-welcomed", "1"); closePanels(); });
 (function firstRun() {
+  return;
   if (store.get("orvex-welcomed", "") || /#open=/.test(location.hash)) return;
   let n = 0; const t = setInterval(() => { if (me) { clearInterval(t); setTimeout(() => { if (!store.get("orvex-welcomed", "")) openHelp(); }, 500); } else if (++n > 20) clearInterval(t); }, 700);
 })();
@@ -2631,7 +2831,263 @@ Robot.setMood("happy", "Hi, I'm ORVEX!", 3000);
     place(); sync(); setInterval(sync, 700);
   } catch (e) { console.warn("mini orb off:", e); }
 })();
+// ======================= ORVEX V6 =======================
+// ---------- remembered login ----------
+function deviceToken() {
+  let t = store.get("orvex-device", "");
+  if (!t || t.length < 24) {
+    try { const a = new Uint8Array(20); crypto.getRandomValues(a); t = Array.from(a, (b) => b.toString(16).padStart(2, "0")).join(""); }
+    catch (e) { t = (Math.random().toString(16).slice(2) + Date.now().toString(16) + Math.random().toString(16).slice(2)).padEnd(32, "0"); }
+    store.set("orvex-device", t);
+  }
+  return t;
+}
+function loadProfile() { try { const p = JSON.parse(store.get("orvex-profile", "") || "null"); return p && p.email ? p : null; } catch (e) { return null; } }
+let _restoring = null;
+function tryRestore() {   // signs this device back in (rebuilds the account if a free host wiped its files). One attempt at a time.
+  if (_restoring) return _restoring;
+  _restoring = (async () => {
+    try {
+      const p = loadProfile();
+      const r = await _fetch("/api/restore", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ device: deviceToken(), email: p && p.email, name: p && p.name }) });
+      if (!r.ok) return false;
+      const d = await r.json();
+      if (!d.user) return false;
+      onUser(d.user);
+      return true;
+    } catch (e) { return false; }
+    finally { setTimeout(() => { _restoring = null; }, 1500); }
+  })();
+  return _restoring;
+}
+{
+  const _ou = onUser;
+  onUser = function (u) { try { store.set("orvex-profile", JSON.stringify({ name: u.name, email: u.email })); } catch (e) {} _ou(u); };
+}
+(async function boot() {
+  const prof = loadProfile();
+  if (prof) onUser(prof);   // open instantly with the remembered account, then check quietly
+  let u = null, net = true;
+  try { const r = await _fetch("/api/me"); u = (await r.json()).user; } catch (e) { net = false; }
+  if (u) {
+    if (!me || me.email !== u.email) onUser(u);
+    _fetch("/api/remember", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ device: deviceToken() }) }).catch(() => {});
+  } else if (net) {
+    if (!(await tryRestore())) { try { localStorage.removeItem("orvex-profile"); } catch (e) {} showAuth(); }
+  }
+})();
 
+// ---------- lazy OCR library ----------
+let _tessP = null;
+function ensureTess() {
+  if (window.Tesseract) return Promise.resolve();
+  if (_tessP) return _tessP;
+  _tessP = new Promise((res, rej) => {
+    const s = document.createElement("script");
+    s.src = "https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js";
+    s.onload = () => res(); s.onerror = () => { _tessP = null; rej(new Error("tesseract")); };
+    document.head.appendChild(s);
+  });
+  return _tessP;
+}
+setTimeout(() => { if ("requestIdleCallback" in window) requestIdleCallback(() => { ensureTess().catch(() => {}); }); }, 6000);
+
+// ---------- cinematic intro ----------
+(function intro() {
+  const el = $("intro"), cv = $("intro-cv");
+  const root = document.documentElement;
+  const reduce = window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches;
+  let done = false, raf = 0, timers = [];
+  function finish() {
+    if (done) return; done = true;
+    cancelAnimationFrame(raf); timers.forEach(clearTimeout);
+    root.classList.add("app-in");
+    el.classList.add("out");
+    setTimeout(() => { el.remove(); window.dispatchEvent(new Event("orvex-intro-done")); }, 1000);
+  }
+  $("in-skip").addEventListener("click", finish);
+  el.addEventListener("click", finish);
+  addEventListener("keydown", (e) => { if (!done && (e.key === "Escape" || e.key === " " || e.key === "Enter")) finish(); });
+  if (reduce || store.get("orvex-nointro", "") === "1") { el.style.display = "none"; finish(); return; }
+  // after the first view the intro is shorter so every later open is quick
+  const seen = store.get("orvex-intro-seen", "") === "1";
+  const T = seen ? { cam: 0.9, title: 1.2, star: 1.9, end: 2.9 } : { cam: 1.5, title: 1.9, star: 2.7, end: 3.9 };
+  store.set("orvex-intro-seen", "1");
+  const ctx = cv.getContext("2d");
+  let W = 0, H = 0, dpr = Math.min(devicePixelRatio || 1, 2);
+  function size() { W = innerWidth; H = innerHeight; cv.width = W * dpr; cv.height = H * dpr; ctx.setTransform(dpr, 0, 0, dpr, 0, 0); }
+  size(); addEventListener("resize", size);
+  const N = 420, S = [];
+  const reset = (s, far) => { s.a = Math.random() * 6.2832; s.r = 0.02 + Math.pow(Math.random(), 1.6) * 1.2; s.z = far ? 1 : Math.random(); s.h = Math.random() < 0.22 ? 200 + Math.random() * 40 : 220 + Math.random() * 60; };
+  for (let i = 0; i < N; i++) { const s = {}; reset(s, false); S.push(s); }
+  const t0 = performance.now();
+  let last = t0;
+  function frame(now) {
+    const t = (now - t0) / 1000, dt = Math.min(0.05, (now - last) / 1000); last = now;
+    // speed: warp, then ease out as the camera tilts down toward the logo
+    const sp = t < T.cam ? 0.9 + t * 0.9 : Math.max(0.16, 2.25 - (t - T.cam) * 2.2);
+    // camera tilt: the star field slides upward as if looking down
+    const tilt = t < T.cam ? 0 : Math.min(1, (t - T.cam) / 1.0);
+    const ease = tilt * tilt * (3 - 2 * tilt);
+    const cx = W / 2, cy = H * (0.5 - 0.0 * ease), diag = Math.hypot(W, H) * 0.55;
+    ctx.fillStyle = "rgba(1,1,10," + (t < T.cam ? 0.28 : 0.5) + ")"; ctx.fillRect(0, 0, W, H);
+    for (const s of S) {
+      const pz = s.z;
+      s.z -= dt * sp * 0.55;
+      if (s.z <= 0.02) { reset(s, true); continue; }
+      const k = 1 / s.z - 1;
+      const x0 = cx + Math.cos(s.a) * s.r * diag * (1 / pz - 1) * 0.35, y0 = cy + Math.sin(s.a) * s.r * diag * (1 / pz - 1) * 0.35 + ease * H * 0.18;
+      const x1 = cx + Math.cos(s.a) * s.r * diag * k * 0.35, y1 = cy + Math.sin(s.a) * s.r * diag * k * 0.35 + ease * H * 0.18;
+      const b = Math.min(1, (1 - s.z) * 1.4);
+      ctx.strokeStyle = "hsla(" + s.h + ",90%," + (70 + 25 * b) + "%," + (0.15 + 0.85 * b) + ")";
+      ctx.lineWidth = 0.6 + b * 1.9; ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+    }
+    raf = requestAnimationFrame(frame);
+  }
+  ctx.fillStyle = "#01010a"; ctx.fillRect(0, 0, W, H);
+  raf = requestAnimationFrame(frame);
+  const at = (s, fn) => timers.push(setTimeout(fn, s * 1000));
+  at(T.cam, () => el.classList.add("cam"));
+  at(T.title, () => el.classList.add("title"));
+  at(T.star, () => el.classList.add("star"));
+  at(T.end, finish);
+})();
+
+// ---------- live captions (computer audio) settings ----------
+(function caps() {
+  const $c = (id) => document.getElementById(id);
+  const tgt = $c("cp-target");
+  LANGS.forEach(([c, n]) => tgt.add(new Option(n, c)));
+  let st = null, busy = false, pollT = 0;
+  const LOCAL_MSG = "Live captions run on the computer where ORVEX is installed. Open ORVEX there with: python orvex.py --app";
+  function paint() {
+    if (!st) return;
+    const s = st.settings || {}, run = !!st.running, status = st.status || {};
+    $c("cp-on").checked = !!s.on;
+    tgt.value = s.target || "en";
+    $c("cp-size").value = String(s.size ?? 1);
+    $c("cp-op").value = s.opacity ?? 0.92;
+    $c("cp-eng").value = s.engine || "auto";
+    $c("cp-orig").checked = s.show_original !== false;
+    const chip = $c("caps-chip"), tag = $c("caps-tag"), p = $c("cp-status");
+    let txt = "", cls = "";
+    if (!st.local) { txt = LOCAL_MSG; cls = "warn"; }
+    else if (!st.available) { txt = "This computer can't show the captions window (Tkinter is missing). Install Python with Tk, then restart ORVEX."; cls = "err"; }
+    else if (!s.on) { txt = "Captions are off."; }
+    else if (status.state === "error") { txt = status.msg || "Captions hit a problem."; cls = "err"; }
+    else if (run && status.state === "listening") { txt = status.msg || "Listening to this computer's sound. Play something."; cls = "ok"; }
+    else if (run) { txt = status.msg || "Starting…"; cls = "warn"; }
+    else { txt = "Starting…"; cls = "warn"; }
+    p.textContent = txt; p.className = "note capst " + cls;
+    const live = !!(s.on && run && st.local);
+    if (chip) { chip.classList.toggle("on", live); chip.textContent = live ? "Captions ON" : "Captions off"; }
+    if (tag) tag.textContent = live ? "ON" : (s.on && st.local ? "…" : "OFF");
+    const row = $c("opt-caps"); if (row) row.checked = !!s.on;
+  }
+  async function load() {
+    try { const r = await _fetch("/api/live/settings"); if (r.ok) { if (!busy) { st = await r.json(); paint(); } return true; } } catch (e) {}
+    return false;
+  }
+  async function save(patch) {
+    busy = true;
+    if (st) { st.settings = Object.assign({}, st.settings, patch); paint(); }
+    try {
+      const r = await fetch("/api/live/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) });
+      const d = await r.json();
+      if (r.ok) st = d; else toast(d.error || "Couldn't change captions", 4500);
+    } catch (e) { toast("Couldn't reach ORVEX", 3000); }
+    busy = false; paint();
+  }
+  function poll() { clearTimeout(pollT); load().finally(() => { pollT = setTimeout(poll, $c("p-caps").hidden ? 5000 : 1500); }); }
+  $c("cp-on").addEventListener("change", (e) => save({ on: e.target.checked }));
+  tgt.addEventListener("change", () => save({ target: tgt.value }));
+  $c("cp-size").addEventListener("change", (e) => save({ size: +e.target.value }));
+  $c("cp-eng").addEventListener("change", (e) => save({ engine: e.target.value }));
+  $c("cp-orig").addEventListener("change", (e) => save({ show_original: e.target.checked }));
+  let opT = 0; $c("cp-op").addEventListener("input", (e) => { clearTimeout(opT); const v = +e.target.value; opT = setTimeout(() => save({ opacity: v }), 150); });
+  $c("c-caps").addEventListener("click", () => { openPanel("caps"); load(); });
+  $c("caps-chip").addEventListener("click", () => { openPanel("caps"); load(); });
+  const ob = $c("opt-caps"); if (ob) ob.addEventListener("change", (e) => save({ on: e.target.checked }));
+  window.orvexSetCaps = (on) => { save({ on: !!on }); toast(on ? "Live captions on" : "Live captions off", 2200); };
+  poll();
+})();
+
+// ---------- guided tour ----------
+(function tour() {
+  const q = (s) => document.querySelector(s);
+  const STEPS = [
+    { sel: ".orbwrap", t: "Meet ORVEX", d: "This is your assistant. Say “Hey Orvex” followed by what you need, like “translate good morning to Telugu”. It listens, answers and speaks back." },
+    { sel: ".quick", t: "Quick translate", d: "Type or paste anything, pick a language and press Translate. Use the mic to speak instead. Press ✨ for a simpler explanation." },
+    { sel: ".cards", t: "Everything ORVEX can do", d: "Read text from any screen or photo, interpret a live conversation, talk two ways with someone, use the camera lens, or translate sound from a tab. Click a card to open it." },
+    { sel: "#c-caps", t: "Live captions", d: "Always on by default. It listens to this computer's sound (Zoom, videos, meetings), names the language and shows small see-through captions in your language. Drag them anywhere, right-click to change size or language." },
+    { sel: ".modesw", t: "Translate or Learn", d: "Flip to Learn mode for short lessons in any language, with easy pronunciation and a quiz." },
+    { sel: ".dock", t: "Talk to ORVEX", d: "Press the mic and just speak, or type a command here. When ORVEX is minimized, only the floating circle stays on your screen. Click it any time." },
+    { sel: "#settings-btn", t: "Settings", d: "Speech speed, wake word, high contrast and live-caption controls live here. Press Ctrl + K for the command palette." },
+    { sel: "#phone-btn", t: "Take it with you", d: "Scan the QR code to put ORVEX on your phone like an app. You're all set. Replay this tour any time with the 🧭 button." }
+  ];
+  let i = 0, on = false, spot, card, block;
+  function build() {
+    block = document.createElement("div"); block.id = "tour-block";
+    spot = document.createElement("div"); spot.id = "tour-spot";
+    card = document.createElement("div"); card.id = "tour-card"; card.setAttribute("role", "dialog"); card.setAttribute("aria-label", "Guided tour");
+    document.body.append(block, spot, card);
+    block.addEventListener("click", (e) => e.stopPropagation());
+  }
+  function place() {
+    const s = STEPS[i]; const el = q(s.sel);
+    card.innerHTML = '<h3></h3><p></p><div class="tdots"></div><div class="trow"><button class="mini" data-a="skip" type="button">Skip tour</button><span style="display:flex;gap:.4rem"><button class="mini" data-a="back" type="button"' + (i ? "" : " hidden") + '>Back</button><button class="pill go" data-a="next" type="button" style="padding:.5rem 1.2rem">' + (i === STEPS.length - 1 ? "Finish" : "Next") + "</button></span></div>";
+    card.querySelector("h3").textContent = (i + 1) + ". " + s.t; card.querySelector("p").textContent = s.d;
+    card.querySelector(".tdots").innerHTML = STEPS.map((_, k) => "<i" + (k === i ? ' class="on"' : "") + "></i>").join("");
+    const W = innerWidth, H = innerHeight;
+    if (el && el.getBoundingClientRect().width) {
+      if (!(el.closest(".dock") || el.closest("header"))) el.scrollIntoView({ block: "center", behavior: "instant" });
+      const r = el.getBoundingClientRect(), pad = 10;
+      if (s.sel === ".orbwrap") {   // the orb is a circle, so its spotlight is a circle too
+        const d = Math.max(r.width, r.height) * 1.12 + pad * 2, cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+        spot.style.cssText = "left:" + (cx - d / 2) + "px;top:" + (cy - d / 2) + "px;width:" + d + "px;height:" + d + "px;border-radius:50%";
+      } else spot.style.cssText = "left:" + (r.left - pad) + "px;top:" + (r.top - pad) + "px;width:" + (r.width + pad * 2) + "px;height:" + (r.height + pad * 2) + "px";
+      const cw = Math.min(380, W * 0.92), ch = card.offsetHeight || 220;
+      const sb = spot.getBoundingClientRect(); let top = sb.bottom + 14; if (top + ch > H - 10) top = sb.top - ch - 14; if (top < 10) top = Math.max(10, Math.min(H - ch - 10, H / 2 - ch / 2));
+      let left = Math.max(10, Math.min(W - cw - 10, r.left + r.width / 2 - cw / 2));
+      card.style.left = left + "px"; card.style.top = top + "px";
+    } else {
+      spot.style.cssText = "left:50%;top:50%;width:0;height:0";
+      card.style.left = Math.max(10, W / 2 - 190) + "px"; card.style.top = Math.max(10, H / 2 - 110) + "px";
+    }
+  }
+  function open() {
+    if (on) return; on = true; i = 0;
+    try { closePanels(); $("settings").hidden = true; } catch (e) {}
+    build(); place();
+    addEventListener("resize", place); addEventListener("keydown", key, true);
+  }
+  function close(done) {
+    if (!on) return; on = false;
+    removeEventListener("resize", place); removeEventListener("keydown", key, true);
+    block.remove(); spot.remove(); card.remove();
+    store.set("orvex-toured", "1");
+    if (done) toast("You're ready. Say “Hey Orvex” any time.", 3200);
+  }
+  function key(e) {
+    if (e.key === "Escape") { e.stopPropagation(); close(false); }
+    else if (e.key === "ArrowRight" || e.key === "Enter") { e.preventDefault(); e.stopPropagation(); go(1); }
+    else if (e.key === "ArrowLeft") { e.preventDefault(); e.stopPropagation(); go(-1); }
+  }
+  function go(d) { i += d; if (i < 0) i = 0; if (i >= STEPS.length) return close(true); place(); }
+  document.addEventListener("click", (e) => {
+    const b = e.target.closest && e.target.closest("#tour-card [data-a]"); if (!b) return;
+    const a = b.dataset.a; if (a === "next") go(1); else if (a === "back") go(-1); else close(false);
+  });
+  $("tour-btn").addEventListener("click", open);
+  const wt = $("welcome-tour"); if (wt) wt.addEventListener("click", () => { closePanels(); setTimeout(open, 150); });
+  window.orvexTour = open;
+  // first time on this device: start after the intro and sign-in
+  if (!store.get("orvex-toured", "") && !/#(open|say)=/.test(location.hash)) {
+    let waited = 0;
+    const go1 = () => { const t = setInterval(() => { waited += 400; if (me && !document.getElementById("intro")) { clearInterval(t); setTimeout(() => { if (!store.get("orvex-toured", "")) open(); }, 900); } else if (waited > 60000) clearInterval(t); }, 400); };
+    go1();
+  }
+})();
 </script>
 </body>
 </html>
@@ -2671,7 +3127,7 @@ MANIFEST = r"""{
 }
 """
 
-SERVICE_WORKER = r"""const V = 'orvex-v5';
+SERVICE_WORKER = r"""const V = 'orvex-v6';
 const SHELL = ['/', '/manifest.webmanifest', '/icon.svg', '/icon.png'];
 const LIBS = ['https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js', 'https://cdn.jsdelivr.net/npm/qrcode@1.5.4/build/qrcode.min.js'];
 const CDN = /(^|\.)(jsdelivr\.net|cdnjs\.cloudflare\.com|gstatic\.com|googleapis\.com|projectnaptha\.com)$/;
@@ -2778,7 +3234,16 @@ def lan_ip():
 
 @app.get("/")
 def index():
+    global _HTML_GZ
+    if "gzip" in (request.headers.get("Accept-Encoding") or ""):
+        if _HTML_GZ is None:
+            import gzip
+            _HTML_GZ = gzip.compress(HTML.encode("utf-8"), 6)
+        return Response(_HTML_GZ, mimetype="text/html", headers={"Content-Encoding": "gzip", "Cache-Control": "no-cache", "Vary": "Accept-Encoding"})
     return Response(HTML, mimetype="text/html", headers={"Cache-Control": "no-cache"})
+
+
+_HTML_GZ = None
 
 
 @app.get("/manifest.webmanifest")
@@ -3554,6 +4019,8 @@ def ai_helper():
 COMMANDS = [
     # (command, label, reply, regex).  This list is the ALLOWLIST: the browser only runs actions that appear here.
     ("float_orb", "Float orb", "Okay! Click “Float orb” in the orb menu to keep me floating over your other windows.", r"\b(float|pin|minimi[sz]e|detach)\b.*\borb\b|\borb\b.*\b(float|pin|minimi[sz]e|detach)\b"),
+    ("caps_off", "Captions off", "Live captions turned off.", r"\b(stop|turn off|disable|hide|close)\b.*\b(transcri\w*|(live|floating|desktop|computer) (captions?|subtitles?))\b"),
+    ("caps_on", "Captions on", "Live captions are on! They listen to your computer's audio.", r"\b(start|turn on|enable|show|open)\b.*\b(transcri\w*|(floating|desktop|computer) (captions?|subtitles?))\b|\btranscribe (my |the )?(computer|system|meeting|audio|video)\b"),
     ("stop_listening", "Stop listening", "Okay, I've stopped listening. Press the microphone when you need me.", r"\b(stop|quit|end|turn off)\s+(listening|the mic(rophone)?)\b|\bmute (yourself|the mic)"),
     ("stop_itp", "Stop live captions", "Live captions stopped.", r"\b(stop|end|close|turn off)\b.*\b(captions?|subtitles?|interpreter)\b"),
     ("pause_audio", "Pause live audio", "Live audio paused.", r"\bpause\b.*\b(audio|live|captions?|listening)\b"),
@@ -3577,7 +4044,7 @@ _COMPILED = [(c, l, r, re.compile(p, re.I)) for c, l, r, p in COMMANDS]
 _EXTRA_ACTIONS = {"open_learn": "Learn mode", "open_translate": "Translate mode"}   # handled by the page, chosen by Gemini only
 ALLOWED_ACTIONS = {c for c, _l, _r, _p in COMMANDS} | set(_EXTRA_ACTIONS)
 _LABELS = dict([(c, l) for c, l, _r, _p in COMMANDS] + list(_EXTRA_ACTIONS.items()))
-_VERB = re.compile(r"\b(open|show|start|launch|begin|read|scan|stop|pause|resume|continue|turn|switch|take|go|display|translate|detect|make|"
+_VERB = re.compile(r"\b(open|show|start|launch|begin|read|scan|disable|hide|close|transcribe|stop|pause|resume|continue|turn|switch|take|go|display|translate|detect|make|"
                    r"increase|decrease|enable|use|play|float|pin|minimi[sz]e|quit|end|mute|unpause|zoom|look|check|see|run|what language|how good)\b", re.I)
 SMALLTALK = [
     (re.compile(r"^\s*(hi|hello|hey|namaste|hola)\b[ !.]*$", re.I), "Hi there! 👋 I'm ORVEX. Ask me anything, or say “read my screen”, “live captions” or “open camera”.", "happy"),
@@ -3947,6 +4414,10 @@ _desk_lock = threading.Lock()
 
 
 def _stop_overlay_safe():
+    try:
+        live_stop()
+    except Exception:
+        pass
     fn = globals().get("stop_overlay")   # the floating translation window from your file, if it has one
     if callable(fn):
         try:
@@ -4110,10 +4581,27 @@ def render_orb(size):
     glow = Image.composite(Image.new("RGB", (S, S), (255, 255, 255)), glow, shine)
     mask = Image.new("L", (S, S), 0)
     ImageDraw.Draw(mask).ellipse([0, 0, S - 1, S - 1], fill=255)
-    out = Image.new("RGB", (S, S), (1, 2, 3))
-    out.paste(glow, (0, 0), mask)
-    ImageDraw.Draw(out).ellipse([1, 1, S - 2, S - 2], outline=(120, 120, 190), width=max(2, S // 70))
-    return out.resize((size, size), Image.LANCZOS)
+    ImageDraw.Draw(glow).ellipse([1, 1, S - 2, S - 2], outline=(120, 120, 190), width=max(2, S // 70))
+    small = glow.resize((size, size), Image.LANCZOS)   # shrink the picture first, then cut a hard circle: no dark square or fringe around the orb
+    hard = mask.resize((size, size), Image.LANCZOS).point(lambda v: 255 if v >= 128 else 0)
+    out = Image.new("RGB", (size, size), (1, 2, 3))
+    out.paste(small, (0, 0), hard)
+    return out
+
+
+def _no_taskbar(win):
+    """Windows: turns a window into a 'tool window' so it has NO taskbar button and no Alt+Tab entry. Only the circle shows."""
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        win.update_idletasks()
+        u = ctypes.windll.user32
+        hwnd = u.GetParent(win.winfo_id()) or win.winfo_id()
+        style = u.GetWindowLongW(hwnd, -20)
+        u.SetWindowLongW(hwnd, -20, (style & ~0x00040000) | 0x00000080)   # remove WS_EX_APPWINDOW, add WS_EX_TOOLWINDOW
+    except Exception:
+        pass
 
 
 class OrbWidget:
@@ -4131,6 +4619,9 @@ class OrbWidget:
             r.attributes("-transparentcolor", ORB_KEY)   # Windows
         except Exception:
             pass
+        r.withdraw()
+        _no_taskbar(r)
+        r.deiconify()
         self.sw, self.sh = r.winfo_screenwidth(), r.winfo_screenheight()
         self.C = ORB_SIZE + ORB_PAD * 2
         self.canvas = tk.Canvas(r, width=self.C, height=self.C, bg=ORB_KEY, highlightthickness=0, bd=0, cursor="hand2")
@@ -4151,6 +4642,7 @@ class OrbWidget:
         self.ctx = tk.Menu(r, tearoff=0)
         self.ctx.add_command(label="⛶  Open full screen", command=lambda: self.open_full())
         self.ctx.add_command(label="🗔  Open ORVEX window", command=lambda: desk_open("translate"))
+        self.ctx.add_command(label="💬  Live captions on / off", command=lambda: self.toggle_captions())
         self.ctx.add_separator()
         self.ctx.add_command(label="Hide orb (say “Hey Orvex” to bring it back)", command=lambda: self.dismiss())
         self.ctx.add_command(label="Quit ORVEX completely", command=lambda: self.quit())
@@ -4240,6 +4732,7 @@ class OrbWidget:
             z.attributes("-transparentcolor", ORB_KEY)
         except Exception:
             pass
+        _no_taskbar(z)
         s = 150
         z.geometry("%dx%d+%d+%d" % (s, s, self.sw // 2 - s // 2, self.sh // 2 - s // 2))
         cv = self.zone_canvas = tk.Canvas(z, width=s, height=s, bg=ORB_KEY, highlightthickness=0)
@@ -4303,6 +4796,7 @@ class OrbWidget:
         for key, title, desc in ORB_MENU:
             row(title, desc, lambda k=key: desk_open(k))
         tk.Frame(body, bg="#2a2660", height=1).pack(fill="x", pady=4)
+        row("💬  Live captions", "ON: listening to computer audio" if live_running() else "OFF: tap to turn on", self.toggle_captions)
         row("⛶  Open full screen", "The whole ORVEX app, big", self.open_full)
         row("✕  Hide orb", "Say “Hey Orvex” to bring it back", self.dismiss)
         row("⏻  Quit ORVEX", "Stops the orb and the wake word", self.quit)
@@ -4316,6 +4810,17 @@ class OrbWidget:
     def auto_close(self, m):
         if self.menu_win is m:
             self.close_menu()
+
+    def toggle_captions(self):
+        cfg = live_load()
+        if live_running():
+            cfg["on"] = False
+            live_save(cfg)
+            live_stop()
+        else:
+            cfg["on"] = True
+            live_save(cfg)
+            live_start()
 
     def open_full(self):
         self.close_menu()
@@ -4519,6 +5024,7 @@ def desk_quit():
     if not is_local():
         return jsonify(error="ORVEX can only be quit from the computer it runs on."), 403
     DESK["quit"].set()
+    _stop_overlay_safe()
     if DESK["on"]:
         DESK["events"].put(("quit",))
         threading.Timer(2.5, os._exit, [0]).start()
@@ -4546,6 +5052,7 @@ def run_desktop(port, window=True, native_wake=True):
         except Exception:
             time.sleep(0.25)
     DESK["native"] = start_native_wake() if native_wake else "off"
+    threading.Timer(1.0, live_autostart).start()   # live captions are ON by default
     print("ORVEX desktop mode is running (port %d)." % port)
     print("  The orb is on your screen. Drag it, click it, right-click it. Drag it to the X in the middle to hide it.")
     print("  Background wake word 'Hey Orvex': " + DESK["native"])
@@ -4742,9 +5249,640 @@ def run_overlay(port, token):
 
 
 
+# ---------------------------------------------------------------------------
+# V6: LIVE CAPTIONS. Listens to the COMPUTER's audio (Zoom, YouTube, any video or meeting), names the language,
+# translates it and shows small futuristic floating captions. It runs as its own small program (python orvex.py --captions)
+# so it never slows down the website or the orb. Settings live in orvex_live.json and change instantly.
+# ---------------------------------------------------------------------------
+import atexit
+
+LIVE_FILE = os.path.join(DATA_DIR, "orvex_live.json")
+LIVE_STATUS_FILE = os.path.join(DATA_DIR, "orvex_live_status.json")
+LIVE_DEFAULT = {"on": True, "target": "en", "size": 1, "opacity": 0.92, "show_original": True, "engine": "auto", "x": -1, "y": -1}
+LIVE_SIZES = [("Small", 12), ("Medium", 15), ("Large", 20), ("Huge", 28)]
+LIVE_ENGINES = ("auto", "whisper", "ai")
+LIVE = {"proc": None, "t0": 0.0}
+_AI_BLOCK = {"until": 0.0}
+
+
+def live_clean(d):
+    o = dict(LIVE_DEFAULT)
+    o["on"] = bool(d.get("on", True))
+    t = str(d.get("target") or "en").strip()
+    o["target"] = norm_code(t) if LANG_OK.match(t) else "en"
+    try:
+        o["size"] = max(0, min(len(LIVE_SIZES) - 1, int(d.get("size", 1))))
+    except (TypeError, ValueError):
+        o["size"] = 1
+    try:
+        o["opacity"] = max(0.35, min(1.0, float(d.get("opacity", 0.92))))
+    except (TypeError, ValueError):
+        o["opacity"] = 0.92
+    o["show_original"] = bool(d.get("show_original", True))
+    o["engine"] = d.get("engine") if d.get("engine") in LIVE_ENGINES else "auto"
+    for k in ("x", "y"):
+        try:
+            o[k] = int(d.get(k, -1))
+        except (TypeError, ValueError):
+            o[k] = -1
+    return o
+
+
+def live_load():
+    raw = {}
+    try:
+        with open(LIVE_FILE, encoding="utf-8") as f:
+            r = json.load(f)
+        if isinstance(r, dict):
+            raw = r
+    except (OSError, ValueError):
+        pass
+    return live_clean(raw)
+
+
+def live_save(d):
+    c = live_clean(d)
+    tmp = LIVE_FILE + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(c, f)
+        os.replace(tmp, LIVE_FILE)
+    except OSError:
+        pass
+    return c
+
+
+def _live_status_write(state, msg="", device=""):
+    try:
+        with open(LIVE_STATUS_FILE, "w", encoding="utf-8") as f:
+            json.dump({"state": state, "msg": msg, "device": device, "t": time.time()}, f)
+    except OSError:
+        pass
+
+
+def _live_status():
+    try:
+        with open(LIVE_STATUS_FILE, encoding="utf-8") as f:
+            s = json.load(f)
+        return s if isinstance(s, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def live_running():
+    return LIVE["proc"] is not None and LIVE["proc"].poll() is None
+
+
+def live_start():
+    """Starts the floating captions. Returns (ok, message)."""
+    if live_running():
+        return True, "already running"
+    if not _tk_available():
+        return False, "Live captions need Python's built-in tkinter."
+    env = dict(os.environ)
+    if AI_KEY:
+        env["GEMINI_API_KEY"] = AI_KEY
+    env["ORVEX_DATA"] = DATA_DIR
+    try:
+        os.remove(LIVE_STATUS_FILE)
+    except OSError:
+        pass
+    try:
+        LIVE["proc"] = subprocess.Popen([sys.executable, os.path.abspath(__file__), "--captions"], env=env)
+        LIVE["t0"] = time.time()
+    except Exception as exc:
+        return False, "Couldn't start live captions: " + str(exc)[:100]
+    return True, "starting"
+
+
+def live_stop():
+    p = LIVE["proc"]
+    LIVE["proc"] = None
+    if p is not None and p.poll() is None:
+        try:
+            p.terminate()
+        except Exception:
+            pass
+
+
+def live_autostart():
+    """Called when ORVEX starts on a computer: live captions are ON by default (the user can turn them off)."""
+    try:
+        if live_load()["on"] and _tk_available():
+            live_start()
+    except Exception:
+        pass
+
+
+atexit.register(live_stop)
+
+
+def _live_payload():
+    st = _live_status()
+    running = live_running()
+    if running and not st:
+        st = {"state": "starting", "msg": "Starting…"}
+    if not running and st.get("state") not in ("error",):
+        st = {"state": "off", "msg": ""}
+    return dict(settings=live_load(), local=is_local(), available=_tk_available(), running=running, status=st,
+                sizes=[n for n, _ in LIVE_SIZES])
+
+
+@app.get("/api/live/settings")
+def live_get():
+    return jsonify(_live_payload())
+
+
+@app.post("/api/live/settings")
+def live_post():
+    if not is_local():
+        return jsonify(error="Live captions run on the computer where ORVEX is installed. Open ORVEX there (python orvex.py --app)."), 403
+    d = request.get_json(silent=True) or {}
+    new = live_save(dict(live_load(), **{k: v for k, v in d.items() if k in LIVE_DEFAULT}))
+    if "on" in d:
+        if new["on"]:
+            live_start()
+        else:
+            live_stop()
+    elif new["on"] and not live_running():
+        pass
+    return jsonify(_live_payload())
+
+
+# ----- audio: computer sound (WASAPI loopback) -> 16 kHz mono float32 -----
+def _open_audio(np, push):
+    """Returns (stop_function, device_label) or (None, error_hint). Tries computer audio first, then the microphone."""
+    def to16k(x, rate, ch):
+        if ch > 1:
+            x = x.reshape(-1, ch).mean(axis=1)
+        if len(x) == 0 or rate == 16000:
+            return x.astype(np.float32)
+        if rate % 16000 == 0:
+            k = rate // 16000
+            n = len(x) // k * k
+            return x[:n].reshape(-1, k).mean(axis=1).astype(np.float32)
+        idx = np.linspace(0, len(x) - 1, max(1, int(len(x) * 16000 / rate)))
+        return np.interp(idx, np.arange(len(x)), x).astype(np.float32)
+
+    errs = []
+    try:   # Windows: the sound that comes out of the speakers / headphones (Zoom, Teams, YouTube, anything)
+        import pyaudiowpatch as pa
+        p = pa.PyAudio()
+        wasapi = p.get_host_api_info_by_type(pa.paWASAPI)
+        spk = p.get_device_info_by_index(wasapi["defaultOutputDevice"])
+        if not spk.get("isLoopbackDevice"):
+            for lb in p.get_loopback_device_info_generator():
+                if spk["name"] in lb["name"]:
+                    spk = lb
+                    break
+        rate, ch = int(spk["defaultSampleRate"]), max(1, int(spk["maxInputChannels"]))
+
+        def cb(in_data, frame_count, time_info, flag):
+            try:
+                push(to16k(np.frombuffer(in_data, dtype=np.int16).astype(np.float32) / 32768.0, rate, ch))
+            except Exception:
+                pass
+            return (None, pa.paContinue)
+
+        stream = p.open(format=pa.paInt16, channels=ch, rate=rate, frames_per_buffer=int(rate * 0.05), input=True,
+                        input_device_index=spk["index"], stream_callback=cb)
+        stream.start_stream()
+
+        def stop():
+            try:
+                stream.stop_stream()
+                stream.close()
+                p.terminate()
+            except Exception:
+                pass
+        return stop, "computer audio: " + str(spk["name"])[:40]
+    except Exception as exc:
+        errs.append(str(exc)[:60])
+    try:   # Linux / some Windows set-ups
+        import soundcard as sc
+        spk = sc.default_speaker()
+        mic = sc.get_microphone(id=str(spk.name), include_loopback=True)
+        alive = {"on": True}
+
+        def run():
+            with mic.recorder(samplerate=48000, channels=2) as rec:
+                while alive["on"]:
+                    data = rec.record(numframes=2400)
+                    push(to16k(np.asarray(data, dtype=np.float32).mean(axis=1), 48000, 1))
+        threading.Thread(target=run, daemon=True).start()
+        return (lambda: alive.update(on=False)), "computer audio: " + str(spk.name)[:40]
+    except Exception as exc:
+        errs.append(str(exc)[:60])
+    try:   # last resort: the microphone (hears the speakers if the volume is up)
+        import sounddevice as sd
+        st = sd.InputStream(samplerate=16000, channels=1, dtype="float32", blocksize=800,
+                            callback=lambda d, f, t, s: push(d[:, 0].copy()))
+        st.start()
+        return (lambda: (st.stop(), st.close())), "microphone only (install pyaudiowpatch to hear the computer itself)"
+    except Exception as exc:
+        errs.append(str(exc)[:60])
+    if os.name == "nt":
+        return None, "Can't hear the computer yet. Run once:  python -m pip install numpy pyaudiowpatch  then restart ORVEX."
+    return None, "Can't open audio. Install:  python -m pip install numpy soundcard  (Mac needs the free BlackHole audio driver)."
+
+
+class CaptionSeg(object):
+    """Cuts the audio into short chunks at every little pause (at most about 2.6 s) so captions follow the speaker closely."""
+
+    def __init__(self, np, sr=16000, frame=800):
+        self.np, self.frame, self.noise = np, frame, 0.002
+        self.min_f, self.end_f, self.max_f = 4, 7, int(2.6 * sr / frame)
+        self.buf, self.speech, self.quiet, self.pre = [], 0, 0, []
+        self.left = np.zeros(0, dtype=np.float32)
+
+    def push(self, arr):
+        np, out = self.np, []
+        self.left = np.concatenate([self.left, arr.astype(np.float32)])
+        n = self.frame
+        while len(self.left) >= n:
+            fr, self.left = self.left[:n], self.left[n:]
+            seg = self._frame(fr)
+            if seg is not None:
+                out.append(seg)
+        return out
+
+    def _frame(self, fr):
+        np = self.np
+        rms = float(np.sqrt(np.mean(fr * fr)))
+        loud = rms > max(0.006, self.noise * 2.5)
+        if not loud and not self.buf:
+            self.noise = 0.97 * self.noise + 0.03 * rms
+        if loud:
+            if not self.buf:
+                self.buf = list(self.pre)
+            self.buf.append(fr)
+            self.speech += 1
+            self.quiet = 0
+        elif self.buf:
+            self.buf.append(fr)
+            self.quiet += 1
+        self.pre = (self.pre + [fr])[-4:]
+        if self.buf and (self.quiet >= self.end_f or len(self.buf) >= self.max_f):
+            seg, ok = np.concatenate(self.buf), self.speech >= self.min_f
+            self.buf, self.speech, self.quiet = [], 0, 0
+            if not ok:
+                return None
+            peak = float(np.max(np.abs(seg)))
+            if 0.0005 < peak < 0.3:
+                seg = seg * (0.5 / peak)   # quiet computer audio is brought up so the speech engine hears it well
+            return seg
+        return None
+
+
+def _wav_bytes(np, x):
+    import struct
+    pcm = (np.clip(x, -1, 1) * 32767).astype("<i2").tobytes()
+    hdr = b"RIFF" + struct.pack("<I", 36 + len(pcm)) + b"WAVEfmt " + struct.pack("<IHHIIHH", 16, 1, 1, 16000, 32000, 2, 16) + b"data" + struct.pack("<I", len(pcm))
+    return hdr + pcm
+
+
+_HALLU = ("thanks for watching", "subtitles by", "thank you for watching", "amara.org", "please subscribe")
+
+
+def caption_transcribe(np, seg, cfg):
+    """One chunk of speech -> (text, language code, translation). Gemini does it in one call; local Whisper is the backup."""
+    eng, target = cfg.get("engine", "auto"), cfg.get("target", "en")
+    err = ""
+    if AI_KEY and eng in ("auto", "ai") and time.time() >= _AI_BLOCK["until"]:
+        try:
+            text, lang, tr = gemini_transcribe(_wav_bytes(np, seg), target)
+            return text, lang or "", (tr or text)
+        except Exception as exc:
+            err = str(exc)
+            if "limit" in err.lower():
+                _AI_BLOCK["until"] = time.time() + 20   # free quota: use the local engine for a moment
+    if eng == "ai" and not err:
+        err = "AI engine is paused."
+    try:
+        model = get_whisper()
+    except Exception:
+        raise RuntimeError(err or "No speech engine: add a Gemini key in Settings, or run: python -m pip install faster-whisper")
+    segs, info = model.transcribe(seg, language=None, beam_size=1, vad_filter=True, condition_on_previous_text=False)
+    text = " ".join(s.text.strip() for s in segs if getattr(s, "no_speech_prob", 0) < 0.6).strip()
+    lang = norm_code(info.language)
+    if not text or any(h in text.lower() for h in _HALLU):
+        return "", lang, ""
+    if lang.split("-")[0].lower() == target.split("-")[0].lower():
+        return text, lang, text
+    return text, lang, do_translate(text, target, lang)
+
+
+def _caption_backend(np, uiq, cfg):
+    def push(arr):
+        for s in segmenter.push(arr):
+            segq.put(s)
+    segq, segmenter = queue.Queue(), CaptionSeg(np)
+    uiq.put(("state", "starting", "Opening computer audio…"))
+    stop, label = _open_audio(np, push)
+    if stop is None:
+        _live_status_write("error", label)
+        uiq.put(("state", "error", label))
+        return
+    _live_status_write("listening", "", label)
+    uiq.put(("state", "listening", label))
+    if not AI_KEY or cfg.get("engine") == "whisper":
+        threading.Thread(target=lambda: get_whisper(), daemon=True).start()   # warm up the local speech model
+    while True:
+        item = segq.get()
+        while segq.qsize() > 2:   # stay live: skip the oldest chunks if we fall behind
+            try:
+                item = segq.get_nowait()
+            except queue.Empty:
+                break
+        if cfg.get("paused"):
+            continue
+        uiq.put(("busy",))
+        try:
+            text, lang, tr = caption_transcribe(np, item, cfg)
+        except Exception as exc:
+            uiq.put(("warn", str(exc)[:110]))
+            continue
+        if text:
+            uiq.put(("cap", {"text": text, "lang": lang, "tr": tr, "target": cfg.get("target", "en")}))
+        else:
+            uiq.put(("idle",))
+
+
+QUICK_LANGS = [("English", "en"), ("Telugu", "te"), ("Hindi", "hi"), ("Tamil", "ta"), ("Kannada", "kn"), ("Malayalam", "ml"), ("Bengali", "bn"),
+               ("Marathi", "mr"), ("Urdu", "ur"), ("Spanish", "es"), ("French", "fr"), ("German", "de"), ("Portuguese", "pt"), ("Russian", "ru"),
+               ("Arabic", "ar"), ("Japanese", "ja"), ("Korean", "ko"), ("Chinese", "zh-CN")]
+
+
+class CaptionUI(object):
+    KEY = "#010203"
+
+    def __init__(self, tk, uiq, cfg):
+        self.tk, self.uiq, self.cfg = tk, uiq, cfg
+        cfg["paused"] = False
+        r = self.root = tk.Tk()
+        r.title("ORVEX captions")
+        r.overrideredirect(True)
+        r.attributes("-topmost", True)
+        r.configure(bg=self.KEY)
+        try:
+            r.attributes("-transparentcolor", self.KEY)
+        except Exception:
+            pass
+        try:
+            r.attributes("-alpha", cfg["opacity"])
+        except Exception:
+            pass
+        self.sw, self.sh = r.winfo_screenwidth(), r.winfo_screenheight()
+        self.cv = tk.Canvas(r, bg=self.KEY, highlightthickness=0, bd=0, cursor="fleur")
+        self.cv.pack()
+        self.lines, self.state, self.msg, self.last, self.busy, self.warn_t = [], "starting", "Starting live captions…", 0.0, False, 0.0
+        self.x, self.y = cfg["x"], cfg["y"]
+        self.W = 480
+        self.drag = None
+        self.tick_n = 0
+        try:
+            self.mtime = os.path.getmtime(LIVE_FILE)
+        except OSError:
+            self.mtime = 0
+        c = self.cv
+        c.bind("<ButtonPress-1>", self.on_press)
+        c.bind("<B1-Motion>", self.on_move)
+        c.bind("<ButtonRelease-1>", self.on_release)
+        c.bind("<Button-3>", self.on_right)
+        c.bind("<Control-MouseWheel>", lambda e: self.set("size", max(0, min(len(LIVE_SIZES) - 1, self.cfg["size"] + (1 if e.delta > 0 else -1)))))
+        r.withdraw()
+        _no_taskbar(r)
+        self.render()
+        r.deiconify()
+        r.after(60, self.pump)
+
+    # ----- drawing -----
+    def render(self):
+        cv, cfg = self.cv, self.cfg
+        fs = LIVE_SIZES[cfg["size"]][1]
+        W = int(fs * 32) + 60
+        pad = int(fs * 0.9)
+        fam = "Segoe UI Semibold" if os.name == "nt" else "Helvetica"
+        cv.delete("all")
+        st = {"y": pad}
+
+        def txt(s, size, color, bold=False, width=None):
+            t = cv.create_text(pad + 6, st["y"], text=s, anchor="nw", fill=color, width=width or (W - 2 * pad - 12),
+                               font=(fam, max(7, int(size)), "bold" if bold else "normal"))
+            bb = cv.bbox(t)
+            st["y"] = bb[3] + int(size * 0.4)
+            return bb
+        live_line = self.lines[-1] if self.lines else None
+        if self.warn_t and time.time() - self.warn_t < 5:
+            chip, col = "⚠ " + self.msg, "#fbbf24"
+        elif self.state == "error":
+            chip, col = "⚠ " + self.msg, "#f87171"
+        elif cfg.get("paused"):
+            chip, col = "❚❚ Paused  (right-click to resume)", "#a5b4fc"
+        elif self.state == "starting":
+            chip, col = "◌ " + self.msg, "#fbbf24"
+        elif live_line:
+            src, tgt = lang_name(live_line["lang"]) if live_line["lang"] else "Speech", lang_name(live_line["target"])
+            same = live_line["lang"] and live_line["lang"].split("-")[0].lower() == live_line["target"].split("-")[0].lower()
+            chip, col = "● LIVE   " + (src if same else src + "  →  " + tgt) + ("   ◌" if self.busy else ""), "#22d3ee"
+        else:
+            chip, col = "● LISTENING   → " + lang_name(cfg["target"]) + ("   ◌" if self.busy else ""), "#22d3ee"
+        compact = not self.lines or cfg.get("paused") or self.state in ("error", "starting")
+        bb = txt(chip, fs * 0.62, col, True, width=(W - 2 * pad - 12) if not compact else 560)
+        if not compact:
+            old = self.lines[:-1]
+            for ln in old[-1:]:
+                txt(ln["tr"], fs * 0.8, "#8fb6c9")
+            txt(live_line["tr"], fs, "#ffffff", True)
+            if cfg["show_original"] and live_line["text"] != live_line["tr"]:
+                txt(live_line["text"], fs * 0.62, "#7f8fb0")
+        else:
+            W = bb[2] + pad + 8
+        H = st["y"] + int(pad * 0.55)
+        r_ = int(fs * 0.9)
+        x1, y1, x2, y2 = 1, 1, W - 1, H - 1
+        pts = [x1 + r_, y1, x1 + r_, y1, x2 - r_, y1, x2 - r_, y1, x2, y1, x2, y1 + r_, x2, y1 + r_, x2, y2 - r_, x2, y2 - r_, x2, y2,
+               x2 - r_, y2, x2 - r_, y2, x1 + r_, y2, x1 + r_, y2, x1, y2, x1, y2 - r_, x1, y2 - r_, x1, y1 + r_, x1, y1 + r_, x1, y1]
+        bg = cv.create_polygon(pts, smooth=True, fill="#070b1c", outline="#1fb6d4", width=1)
+        n = 28
+        span = max(1, W - 2 * r_)
+        accent = []
+        for i in range(n):
+            f = i / (n - 1)
+            c = "#%02x%02x%02x" % (int(124 + (34 - 124) * f), int(92 + (211 - 92) * f), int(255 + (238 - 255) * f))
+            accent.append(cv.create_rectangle(r_ + span * i / n, 1, r_ + span * (i + 1) / n + 1, 4, fill=c, outline=""))
+        for a in reversed(accent):
+            cv.tag_lower(a)
+        cv.tag_lower(bg)
+        cv.config(width=W, height=H)
+        self.W = W
+        if self.x < 0 or self.y < 0:
+            self.x, self.y = (self.sw - W) // 2, self.sh - 240
+        x = int(min(max(0, self.x), max(0, self.sw - W)))
+        y = int(min(max(0, self.y), max(0, self.sh - H - 8)))
+        self.root.geometry("%dx%d+%d+%d" % (W, H, x, y))
+
+    # ----- events from the speech thread, and the settings file -----
+    def pump(self):
+        dirty = False
+        try:
+            while True:
+                m = self.uiq.get_nowait()
+                k = m[0]
+                if k == "cap":
+                    self.lines = (self.lines + [m[1]])[-2:]
+                    self.state, self.last, self.busy = "listening", time.time(), False
+                elif k == "state":
+                    self.state, self.msg = m[1], m[2]
+                elif k == "busy":
+                    self.busy = True
+                elif k == "idle":
+                    self.busy = False
+                elif k == "warn":
+                    self.msg, self.warn_t, self.busy = m[1], time.time(), False
+                dirty = True
+        except queue.Empty:
+            pass
+        if self.lines and time.time() - self.last > 8:
+            self.lines, dirty = [], True   # after a quiet moment the caption shrinks back to a tiny "listening" pill
+        if self.warn_t and time.time() - self.warn_t > 5:
+            self.warn_t, dirty = 0.0, True
+        self.tick_n += 1
+        if self.tick_n % 10 == 0:
+            try:
+                mt = os.path.getmtime(LIVE_FILE)
+            except OSError:
+                mt = self.mtime
+            if mt != self.mtime:
+                self.mtime = mt
+                new = live_load()
+                if not new["on"]:
+                    self.quit()
+                    return
+                paused = self.cfg.get("paused", False)
+                self.cfg.update(new)
+                self.cfg["paused"] = paused
+                try:
+                    self.root.attributes("-alpha", self.cfg["opacity"])
+                except Exception:
+                    pass
+                dirty = True
+        if dirty:
+            self.render()
+        self.root.after(60, self.pump)
+
+    # ----- mouse: drag to move, right-click for every option -----
+    def on_press(self, e):
+        self.drag = (e.x_root - self.root.winfo_x(), e.y_root - self.root.winfo_y())
+
+    def on_move(self, e):
+        if self.drag:
+            self.x, self.y = e.x_root - self.drag[0], e.y_root - self.drag[1]
+            self.root.geometry("+%d+%d" % (self.x, self.y))
+
+    def on_release(self, e):
+        if self.drag:
+            self.drag = None
+            self.cfg["x"], self.cfg["y"] = int(self.x), int(self.y)
+            self.save()
+
+    def save(self):
+        live_save(self.cfg)
+        try:
+            self.mtime = os.path.getmtime(LIVE_FILE)
+        except OSError:
+            pass
+
+    def set(self, key, val):
+        self.cfg[key] = val
+        if key == "opacity":
+            try:
+                self.root.attributes("-alpha", val)
+            except Exception:
+                pass
+        if key == "target":
+            self.lines = []
+        self.save()
+        self.render()
+
+    def on_right(self, e):
+        tk, cfg = self.tk, self.cfg
+        m = tk.Menu(self.root, tearoff=0)
+        vt, vs, vo, ve, vp = tk.StringVar(value=cfg["target"]), tk.IntVar(value=cfg["size"]), tk.DoubleVar(value=cfg["opacity"]), tk.StringVar(value=cfg["engine"]), tk.BooleanVar(value=cfg["show_original"])
+        lm = tk.Menu(m, tearoff=0)
+        for name, code in QUICK_LANGS:
+            lm.add_radiobutton(label=name, variable=vt, value=code, command=lambda c=code: self.set("target", c))
+        m.add_cascade(label="🌐  Translate to", menu=lm)
+        sm = tk.Menu(m, tearoff=0)
+        for i, (n, _) in enumerate(LIVE_SIZES):
+            sm.add_radiobutton(label=n, variable=vs, value=i, command=lambda i=i: self.set("size", i))
+        m.add_cascade(label="🔠  Text size  (Ctrl + wheel)", menu=sm)
+        om = tk.Menu(m, tearoff=0)
+        for v in (0.5, 0.65, 0.8, 0.92, 1.0):
+            om.add_radiobutton(label="%d%%" % int(v * 100), variable=vo, value=v, command=lambda v=v: self.set("opacity", v))
+        m.add_cascade(label="◐  Transparency", menu=om)
+        m.add_checkbutton(label="Show the original words", variable=vp, command=lambda: self.set("show_original", bool(vp.get())))
+        em = tk.Menu(m, tearoff=0)
+        for lab, val in (("Automatic", "auto"), ("AI (Gemini, best accuracy)", "ai"), ("Local (Whisper, no limits)", "whisper")):
+            em.add_radiobutton(label=lab, variable=ve, value=val, command=lambda v=val: self.set("engine", v))
+        m.add_cascade(label="⚙  Speech engine", menu=em)
+        m.add_separator()
+        m.add_command(label="▶  Resume" if cfg.get("paused") else "❚❚  Pause", command=self.toggle_pause)
+        m.add_command(label="Clear captions", command=lambda: (setattr(self, "lines", []), self.render()))
+        m.add_separator()
+        m.add_command(label="✕  Turn live captions off", command=self.turn_off)
+        try:
+            m.tk_popup(e.x_root, e.y_root)
+        finally:
+            m.grab_release()
+
+    def toggle_pause(self):
+        self.cfg["paused"] = not self.cfg.get("paused", False)
+        self.render()
+
+    def turn_off(self):
+        self.cfg["on"] = False
+        self.save()
+        self.quit()
+
+    def quit(self):
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
+        os._exit(0)
+
+    def run(self):
+        self.root.mainloop()
+
+
+def run_captions():
+    """Entry point of the floating live-caption window (python orvex.py --captions)."""
+    try:
+        import tkinter as tk
+    except ImportError:
+        print("Live captions need Python's built-in tkinter.")
+        return 1
+    cfg = live_load()
+    uiq = queue.Queue()
+    try:
+        import numpy as np
+    except ImportError:
+        np = None
+    ui = CaptionUI(tk, uiq, cfg)
+    if np is None:
+        msg = "Live captions need numpy. Run:  python -m pip install numpy pyaudiowpatch"
+        _live_status_write("error", msg)
+        uiq.put(("state", "error", msg))
+    else:
+        threading.Thread(target=_caption_backend, args=(np, uiq, cfg), daemon=True).start()
+    ui.run()
+    return 0
+
+
 REQUIREMENTS = "flask\ngunicorn\nlangdetect\npillow\nedge-tts\n"
 SETUP_CORE = ["flask", "langdetect", "faster-whisper", "pillow", "edge-tts"]
-SETUP_OPTIONAL = ["sounddevice", "numpy"]   # only for the background "Hey Orvex" listener in desktop mode
+SETUP_OPTIONAL = ["sounddevice", "numpy", "pyaudiowpatch", "soundcard"]   # only for the background "Hey Orvex" listener in desktop mode
 
 DOCKERFILE = """FROM python:3.11-slim
 WORKDIR /app
@@ -4821,6 +5959,8 @@ if __name__ == "__main__":
         sys.exit(embed_qr(args[i + 1] if len(args) > i + 1 else None))
     elif "--export" in args:
         export_files()
+    elif "--captions" in args:
+        sys.exit(run_captions() or 0)
     elif "--overlay" in args:
         i = args.index("--overlay")
         run_overlay(args[i + 1], args[i + 2])
@@ -4831,5 +5971,6 @@ if __name__ == "__main__":
         print("ORVEX is running at http://127.0.0.1:%d" % port)
         print("On your phone (same Wi-Fi): http://%s:%d   (or press the Phone button for a QR code)" % (ip, port))
         print("Tip: python orvex.py --app  gives you the desktop app with the floating orb.")
+        threading.Timer(1.5, live_autostart).start()   # live captions are ON by default (turn off in the app)
         # host 0.0.0.0 lets phones on your Wi-Fi connect; debug stays OFF because the debugger would be exposed to the network.
         app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
