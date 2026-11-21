@@ -3,7 +3,7 @@
 ONE FILE, EVERYTHING INSIDE.
 
   python orvex.py --setup     installs all needed packages (one time, needs internet)
-  python orvex.py             starts the website at http://127.0.0.1:5000  (install it from the browser: it then works offline)
+  python orvex.py             starts the website at http://127.0.0.1:5000 (+ the floating orb on a computer with a screen; --no-orb for website only)
   python orvex.py --app       desktop mode: a floating orb on your screen + the ORVEX window + background "Hey Orvex"
   python orvex.py --app --background   orb only (no window), "Hey Orvex" brings everything back
   python orvex.py --install-desktop    Windows: start the orb with the computer + desktop shortcut (--uninstall-desktop removes it)
@@ -22,6 +22,8 @@ FEATURES
   * Installable app (PWA) with an offline service worker; sign-in is remembered for offline start
   * Accounts (orvex_users.db next to this file), optional free Gemini key (.env: GEMINI_API_KEY=...), QR code for your phone
   * Floating translation window (tkinter) for live audio, free MyMemory translation (no key, no account), Language Lab test page
+  * Live captions: translated computer audio (Zoom, videos, meetings) floats over every app in a see-through window (desktop), or in
+    an always-on-top Picture-in-Picture window (website, Chrome/Edge). The orb stays on screen when ORVEX is closed or minimized.
 
 Speech recognition runs locally (faster-whisper), OCR runs in the browser (Tesseract.js), only TEXT goes to the translation service.
 """
@@ -228,7 +230,7 @@ def current_user():
 
 # "/api/overlay/poll" is open to the login check because the floating window (a separate local program)
 # has no browser session; it is protected by a random per-run token and only answers this computer.
-OPEN_API = {"/api/health", "/api/config", "/api/me", "/api/login", "/api/signup", "/api/logout", "/api/lan-url", "/api/overlay/poll", "/api/restore"}
+OPEN_API = {"/api/health", "/api/config", "/api/me", "/api/login", "/api/signup", "/api/logout", "/api/lan-url", "/api/overlay/poll", "/api/restore", "/api/desk/ping"}
 
 
 @app.before_request
@@ -553,7 +555,7 @@ html[data-contrast="1"] .settings{background:#000}
 @keyframes pop{from{opacity:0;translate:0 6px}}
 @keyframes pulse{50%{box-shadow:0 0 0 8px rgba(239,68,68,.25)}}
 @keyframes blinkdot{50%{opacity:.3}}
-@media(max-width:600px){.logo{letter-spacing:.2em;font-size:1.3rem}.lrow,.lhead{grid-template-columns:1fr}.ib span{display:none}}
+@media(max-width:600px){.logo{letter-spacing:.2em;font-size:1.3rem}.lrow,.lhead{grid-template-columns:1fr}.ib{padding:0 .6rem;font-size:.78rem;height:2.3rem}}
 @media(prefers-reduced-motion:reduce){*{animation-duration:.01s!important;animation-iteration-count:1!important}}
 </style>
 <style>
@@ -726,7 +728,7 @@ html[data-contrast="1"] .lt-big{color:#fff;background:none}
 .lwin{text-align:center;display:flex;flex-direction:column;align-items:center;gap:.6rem;padding:1.5rem 0}
 .lwin .trophy{font-size:4rem;animation:bounce .8s}
 .lwin .stars{font-size:2.4rem;color:#fde68a;letter-spacing:.2em;text-shadow:0 0 18px rgba(253,224,71,.7)}
-.cf{position:fixed;top:-20px;z-index:80;font-size:1.4rem;pointer-events:none;animation:fall 2.4s ease-in forwards}
+.cf{position:fixed;top:-20px;z-index:80;width:.6rem;height:.95rem;border-radius:2px;pointer-events:none;animation:fall 2.4s ease-in forwards}
 @keyframes fall{to{transform:translateY(110vh) rotate(540deg);opacity:.2}}
 @keyframes shake{25%{transform:translateX(-6px)}75%{transform:translateX(6px)}}
 </style>
@@ -860,13 +862,13 @@ h1{font-size:clamp(2.1rem,6.4vw,3.8rem);filter:drop-shadow(0 6px 30px rgba(124,9
   <span class="logo">orvex</span>
   <div class="tools">
     <label class="modesw" title="Switch between Translate and Learn"><span class="m-t">Translate</span><input type="checkbox" id="mode-sw"><i></i><span class="m-l">Learn</span></label>
-    <button id="user-btn" class="ib" hidden title="Account">👤 <span id="user-name"></span></button>
-    <button id="install-btn" class="ib" hidden title="Install ORVEX as an app">⬇ <span>Install</span></button>
+    <button id="user-btn" class="ib" hidden title="Account"><span id="user-name"></span></button>
+    <button id="install-btn" class="ib" hidden title="Install ORVEX as an app"><span>Install</span></button>
     
     <button id="caps-chip" type="button" title="Live captions for computer audio">Captions</button>
-    <button id="tour-btn" class="ib" title="Guided tour: how ORVEX works">🧭 <span>Tour</span></button>
-    <button id="help-btn" class="ib" title="How to use ORVEX" aria-label="Help">❓ <span>Help</span></button>
-    <button id="phone-btn" class="ib" title="Open on your phone">📱 <span>Phone</span></button>
+    <button id="tour-btn" class="ib" title="Guided tour: how ORVEX works"><span>Tour</span></button>
+    <button id="help-btn" class="ib" title="How to use ORVEX" aria-label="Help"><span>Help</span></button>
+    <button id="phone-btn" class="ib" title="Open on your phone"><span>Phone</span></button>
     <button id="size-btn" class="ib" title="Change text size" aria-label="Change text size">Aa</button>
     <button id="settings-btn" class="ib gem" title="Settings" aria-label="Settings"></button>
   </div>
@@ -877,8 +879,9 @@ h1{font-size:clamp(2.1rem,6.4vw,3.8rem);filter:drop-shadow(0 6px 30px rgba(124,9
 
 <div id="settings" class="settings" hidden>
   <h3>Settings</h3>
-  <button id="pal-open" class="pill go" type="button">⌘ Command Palette (Ctrl + K)</button>
+  <button id="pal-open" class="pill go" type="button">Command palette (Ctrl + K)</button>
   <label class="row"><input type="checkbox" id="opt-caps" checked> Live captions (computer audio)</label>
+  <label class="row"><input type="checkbox" id="opt-float"> <span>Keep a floating orb on screen when I switch tabs or minimize (Chrome or Edge)</span></label>
   <label class="row"><input type="checkbox" id="opt-speak" checked> Speak responses aloud</label>
   <label class="row"><input type="checkbox" id="opt-contrast"> High contrast</label>
   <label class="row"><input type="checkbox" id="opt-auto"> Speak translations automatically</label>
@@ -886,7 +889,7 @@ h1{font-size:clamp(2.1rem,6.4vw,3.8rem);filter:drop-shadow(0 6px 30px rgba(124,9
   <div class="row"><input id="wake-in" type="text" maxlength="30" style="flex:1;min-width:0;color:#111;background:#fff;border:0;border-radius:.7rem;padding:.5rem .7rem" placeholder="Your own wake word, e.g. Jarvis" autocomplete="off" aria-label="Custom wake word"><button id="wake-save" class="mini" type="button">Set</button><button id="wake-reset" class="mini" type="button">Reset</button></div>
   <span class="note">Pick any name you like. Say it, then your command. It also works in the background on this computer.</span>
   <div id="key-box" class="keybox" hidden>
-    <span class="note">Optional: free Gemini API key (aistudio.google.com/apikey) to unlock the AI tutor (any language, any sentence, with easy pronunciation) and ✨ Explain, Simplify and Replies. It is checked, then saved in a private .env file next to orvex.py on this computer (never uploaded).</span>
+    <span class="note">Optional: free Gemini API key (aistudio.google.com/apikey) to unlock the AI tutor (any language, any sentence, with easy pronunciation) and Explain, Simplify and Replies. It is checked, then saved in a private .env file next to orvex.py on this computer (never uploaded).</span>
     <div class="row"><input id="key-in" type="password" placeholder="AIza…" autocomplete="off" aria-label="Gemini API key"><button id="key-save" class="mini" type="button">Save</button></div>
   </div>
   <span id="ai-chip" class="note"></span>
@@ -930,8 +933,8 @@ h1{font-size:clamp(2.1rem,6.4vw,3.8rem);filter:drop-shadow(0 6px 30px rgba(124,9
     <span class="logo">orvex</span>
     <div class="ltools">
       <span id="l-net" class="lpill on" title="Connection">● Online</span>
-      <span class="lpill" title="Days in a row">🔥 <b id="l-streak">0</b></span>
-      <span class="lpill" title="Experience points">⚡ <b id="l-xp">0</b> XP</span>
+      <span class="lpill" title="Days in a row">Streak <b id="l-streak">0</b></span>
+      <span class="lpill" title="Experience points"><b id="l-xp">0</b> XP</span>
       <label class="modesw" title="Switch between Translate and Learn"><span class="m-t">Translate</span><input type="checkbox" id="learn-sw" checked><i></i><span class="m-l">Learn</span></label>
       <button id="l-settings" class="ib gem" type="button" title="Settings" aria-label="Settings"></button>
     </div>
@@ -951,23 +954,23 @@ h1{font-size:clamp(2.1rem,6.4vw,3.8rem);filter:drop-shadow(0 6px 30px rgba(124,9
       <p id="l-units-note" class="note" style="text-align:center" hidden></p>
       <div id="l-units" class="units"></div>
       <div class="row" style="justify-content:center;margin-top:.6rem">
-        <button id="l-offline" class="pill" type="button">⬇ Save this course for offline</button>
+        <button id="l-offline" class="pill" type="button">Save this course for offline</button>
         <span id="l-offnote" class="note"></span>
       </div>
       <div class="lsect">3 · Say anything</div>
       <div class="lbox">
         <span class="note">Type what you want to say in English. I'll teach you how to say it.</span>
-        <div class="row"><input id="l-say" type="text" maxlength="300" placeholder="e.g. Good morning, how are you?"><button id="l-say-go" class="pill go" type="button">✨ Teach me</button></div>
+        <div class="row"><input id="l-say" type="text" maxlength="300" placeholder="e.g. Good morning, how are you?"><button id="l-say-go" class="pill go" type="button">Teach me</button></div>
         <div id="l-card"></div>
       </div>
       <div class="lsect">4 · Make a lesson on any topic</div>
       <div class="lbox">
-        <div class="row"><input id="l-topic" type="text" maxlength="80" placeholder="e.g. ordering coffee, at the airport, meeting family"><button id="l-topic-go" class="pill go" type="button">✨ Build lesson</button></div>
+        <div class="row"><input id="l-topic" type="text" maxlength="80" placeholder="e.g. ordering coffee, at the airport, meeting family"><button id="l-topic-go" class="pill go" type="button">Build lesson</button></div>
         <span id="l-topic-note" class="note"></span>
       </div>
     </section>
     <section id="lv-play" class="lplay" hidden>
-      <div class="lptop"><button id="lp-exit" class="mini" type="button">✕ Exit</button><div class="lprog"><i id="lp-bar"></i></div></div>
+      <div class="lptop"><button id="lp-exit" class="mini" type="button">Exit</button><div class="lprog"><i id="lp-bar"></i></div></div>
       <div id="lp-body" class="lbody"></div>
       <div id="lp-foot" class="lfoot"></div>
     </section>
@@ -982,9 +985,9 @@ h1{font-size:clamp(2.1rem,6.4vw,3.8rem);filter:drop-shadow(0 6px 30px rgba(124,9
   <ol class="steps"><li>Press the big button and pick a window <b>or</b> take a photo</li><li>ORVEX reads the words and tells you the language</li><li>Press Translate</li></ol>
   <p id="scr-status" class="note"></p>
   <div class="row">
-    <button id="scr-share" class="pill go big" type="button">🖥 Choose screen to share</button>
+    <button id="scr-share" class="pill go big" type="button">Choose screen to share</button>
     <button id="scr-read" class="pill" type="button" hidden>Read again</button>
-    <label class="pill big" style="cursor:pointer">📷 Photo / image<input id="scr-file" type="file" accept="image/*" hidden></label>
+    <label class="pill big" style="cursor:pointer">Photo / image<input id="scr-file" type="file" accept="image/*" hidden></label>
   </div>
   <div id="scr-result" hidden>
     <p>Language: <b id="scr-lang"></b> <span id="scr-conf" class="note"></span></p>
@@ -994,7 +997,7 @@ h1{font-size:clamp(2.1rem,6.4vw,3.8rem);filter:drop-shadow(0 6px 30px rgba(124,9
     <div class="row" style="margin-top:.4rem">
       <select id="tr-target" class="tgt"></select>
       <button id="tr-btn" class="pill go" type="button">Translate</button>
-      <button id="tr-speak" class="pill" type="button" hidden>🔊 Listen</button>
+      <button id="tr-speak" class="pill" type="button" hidden>Listen</button>
     </div>
     <div id="tr-out" class="trout" hidden></div>
   </div>
@@ -1003,7 +1006,7 @@ h1{font-size:clamp(2.1rem,6.4vw,3.8rem);filter:drop-shadow(0 6px 30px rgba(124,9
 <!-- Live audio -->
 <section id="p-live" class="panel" hidden>
   <div class="panel-head"><h2>Live audio translation</h2><button class="x" data-close aria-label="Close">×</button></div>
-  <ol class="steps"><li>Open the video or meeting in another browser tab</li><li>Press Start, choose that tab, tick <b>Also share tab audio</b></li><li>Words and their translation appear below</li></ol>
+  <ol class="steps"><li>Press <b>Float captions</b>: a small always-on-top window opens</li><li>Press Start, choose the video or meeting tab (or <b>Entire screen</b> for Zoom and other apps) and tick the sound option</li><li>The translation floats over whatever you are watching, not inside ORVEX</li></ol>
   <p class="note"><b>Privacy:</b> audio is turned into text on this computer and thrown away. It is never saved. Only the recognised <i>text</i> goes to the free translation service. Delay is usually a few seconds up to about 10 seconds. Works in Chrome or Edge on a computer.</p>
   <p class="note"><b>Sound from any app</b> (video player, game, call): press Start, choose <b>Entire screen</b> and tick <b>Share system audio</b> (Windows, Chrome or Edge). A single window never includes sound. Nothing is captured until you press Start.</p>
   <div class="row">
@@ -1012,14 +1015,18 @@ h1{font-size:clamp(2.1rem,6.4vw,3.8rem);filter:drop-shadow(0 6px 30px rgba(124,9
     <label class="opt chk"><input type="checkbox" id="live-say"> Speak the translation</label>
   </div>
   <div class="row">
-    <button id="live-start" class="pill go big" type="button">▶ Choose a tab &amp; start</button>
-    <button id="live-pause" class="pill" type="button" hidden>⏸ Pause</button>
-    <button id="live-resume" class="pill" type="button" hidden>▶ Resume</button>
-    <button id="live-stop" class="pill" type="button" hidden>■ Stop</button>
+    <button id="live-start" class="pill go big" type="button">Choose a tab &amp; start</button>
+    <button id="live-pause" class="pill" type="button" hidden>Pause</button>
+    <button id="live-resume" class="pill" type="button" hidden>Resume</button>
+    <button id="live-stop" class="pill" type="button" hidden>Stop</button>
     <button id="live-clear" class="pill" type="button">Clear</button>
   </div>
   <div class="row">
-    <button id="live-ovl" class="pill" type="button">🪟 Show floating window</button>
+    <button id="live-pip" class="pill go" type="button">Float captions over other windows</button>
+    <span id="live-pip-note" class="note"></span>
+  </div>
+  <div class="row">
+    <button id="live-ovl" class="pill" type="button">Show floating window</button>
     <span id="live-ovl-note" class="note"></span>
   </div>
   <div class="lvl" title="Live audio level"><i id="lvl"></i></div>
@@ -1039,7 +1046,7 @@ h1{font-size:clamp(2.1rem,6.4vw,3.8rem);filter:drop-shadow(0 6px 30px rgba(124,9
     </ol>
   </div>
   <p class="urlbox" id="qr-url">…</p>
-  <div class="row"><button id="copy-url" class="pill" type="button">Copy link</button><button id="install-btn2" class="pill go" type="button" hidden>⬇ Install on this device</button></div>
+  <div class="row"><button id="copy-url" class="pill" type="button">Copy link</button><button id="install-btn2" class="pill go" type="button" hidden>Install on this device</button></div>
   <p class="note">The phone must be on the same Wi-Fi as this computer (or ORVEX must be hosted online). Phones can't share a screen or tab audio, so there you use <b>photo reading</b>, <b>typing</b> and <b>voice</b>. Microphone access on a phone needs the secure (https) address.</p>
 </section>
 
@@ -1054,12 +1061,13 @@ h1{font-size:clamp(2.1rem,6.4vw,3.8rem);filter:drop-shadow(0 6px 30px rgba(124,9
     <label class="capopt">Translate captions into <select id="cp-target"></select></label>
     <label class="capopt">Text size <select id="cp-size"><option value="0">Small</option><option value="1">Medium</option><option value="2">Large</option><option value="3">Huge</option></select></label>
     <label class="capopt">Transparency <input type="range" id="cp-op" min="0.4" max="1" step="0.05" value="0.92"></label>
+    <label class="capopt">Background <select id="cp-bg"><option value="glass">Dark glass box</option><option value="clear">Clear: only the words (see-through)</option></select></label>
     <label class="capopt">Speech engine <select id="cp-eng"><option value="auto">Automatic</option><option value="ai">AI (Gemini, most accurate)</option><option value="whisper">Local (Whisper, no limits)</option></select></label>
   </div>
   <label class="sw"><input type="checkbox" id="cp-orig"><i></i><span>Also show the original words</span></label>
-  <div class="row"><button id="cp-test" class="pill go" type="button">▶ Show a test caption now</button></div>
+  <div class="row"><button id="cp-test" class="pill go" type="button">Show a test caption now</button></div>
   <div class="capprev"><small>● LIVE &nbsp; Telugu → English</small><b>Hello everyone, let's start the meeting.</b><span>నమస్కారం అందరికీ, సమావేశాన్ని ప్రారంభిద్దాం.</span></div>
-  <p class="note"><b>Tip:</b> drag the captions to move them. <b>Right-click</b> them for size, language, transparency and pause. <b>Ctrl + mouse wheel</b> changes the size. Audio is turned into text and thrown away, never saved.</p>
+  <p class="note"><b>Tip:</b> drag the captions to move them. <b>Right-click</b> them for size, language, transparency, background (dark box or clear text only) and pause. <b>Ctrl + mouse wheel</b> changes the size. Audio is turned into text and thrown away, never saved.</p>
   <p class="note">Captions run on the computer where ORVEX is installed. The first launch installs what they need by itself (internet needed once).</p>
 </section>
 <section id="p-welcome" class="panel welcome" hidden>
@@ -1071,7 +1079,7 @@ h1{font-size:clamp(2.1rem,6.4vw,3.8rem);filter:drop-shadow(0 6px 30px rgba(124,9
     <li><b>Or just say it.</b> Press the microphone and say “Orvex, read my screen”.</li>
     <li><b>Hear the answer.</b> I read translations aloud. The <b>Aa</b> button makes everything bigger.</li>
   </ol>
-  <button id="welcome-tour" class="pill" type="button">🧭 Take the guided tour</button>
+  <button id="welcome-tour" class="pill" type="button">Take the guided tour</button>
   <button id="welcome-go" class="pill go big" type="button">Let's start</button>
 </section>
 
@@ -1085,11 +1093,11 @@ h1{font-size:clamp(2.1rem,6.4vw,3.8rem);filter:drop-shadow(0 6px 30px rgba(124,9
     <label class="opt chk"><input type="checkbox" id="itp-say"> Speak translation (use headphones)</label>
   </div>
   <div class="row">
-    <button id="itp-start" class="pill go big" type="button">🎙 Start live captions</button>
-    <button id="itp-stop" class="pill" type="button" hidden>■ Stop</button>
+    <button id="itp-start" class="pill go big" type="button">Start live captions</button>
+    <button id="itp-stop" class="pill" type="button" hidden>Stop</button>
     <button id="itp-clear" class="pill" type="button">Clear</button>
-    <button id="itp-srt" class="pill" type="button">⬇ .srt subtitles</button>
-    <button id="itp-txt" class="pill" type="button">⬇ .txt transcript</button>
+    <button id="itp-srt" class="pill" type="button">.srt subtitles</button>
+    <button id="itp-txt" class="pill" type="button">.txt transcript</button>
   </div>
   <p id="itp-status" class="note"></p>
   <div class="subs"><div id="itp-orig" class="sub-orig"></div><div id="itp-tr" class="sub-tr"></div></div>
@@ -1107,8 +1115,8 @@ h1{font-size:clamp(2.1rem,6.4vw,3.8rem);filter:drop-shadow(0 6px 30px rgba(124,9
     <label class="opt">Person B speaks <select id="cv-b"></select></label>
   </div>
   <div class="cvbtns">
-    <button id="cv-ba" class="cvb-btn a" type="button">🎤 <span id="cv-na"></span> speaks</button>
-    <button id="cv-bb" class="cvb-btn b" type="button">🎤 <span id="cv-nb"></span> speaks</button>
+    <button id="cv-ba" class="cvb-btn a" type="button"><span id="cv-na"></span> speaks</button>
+    <button id="cv-bb" class="cvb-btn b" type="button"><span id="cv-nb"></span> speaks</button>
   </div>
   <p id="cv-status" class="note"></p>
   <div id="cv-log" class="cvlog"></div>
@@ -1121,8 +1129,8 @@ h1{font-size:clamp(2.1rem,6.4vw,3.8rem);filter:drop-shadow(0 6px 30px rgba(124,9
   <div class="row">
     <label class="opt">Translate into <select id="lens-tgt" class="tgt"></select></label>
     <label class="sw"><input type="checkbox" id="lens-auto" checked><i></i><span>Live scan</span></label>
-    <button id="lens-snap" class="mini" type="button">📸 Scan now</button>
-    <button id="lens-flip" class="mini" type="button">🔄 Flip camera</button>
+    <button id="lens-snap" class="mini" type="button">Scan now</button>
+    <button id="lens-flip" class="mini" type="button">Flip camera</button>
   </div>
   <p id="lens-status" class="note"></p>
   <p class="note">The picture stays in your browser. Only the recognised text is sent for translation. Set the text language in Settings.</p>
@@ -1132,14 +1140,14 @@ h1{font-size:clamp(2.1rem,6.4vw,3.8rem);filter:drop-shadow(0 6px 30px rgba(124,9
 <section id="p-lab" class="panel" hidden>
   <div class="panel-head"><h2>Language Lab: how good is ORVEX?</h2><button class="x" data-close aria-label="Close">×</button></div>
   <p class="note">Tests the language detector on 80 sentences (8 sentences in each of 10 languages) it has not been tuned on, and compares it with two simple baselines. Results are per language, with the mistakes shown.</p>
-  <div class="row"><button id="lab-run" class="pill go big" type="button">▶ Run the test</button></div>
+  <div class="row"><button id="lab-run" class="pill go big" type="button">Run the test</button></div>
   <div id="lab-out" class="note"></div>
 </section>
 
 <!-- Saved + history -->
 <section id="p-saved" class="panel" hidden>
   <div class="panel-head"><h2>Saved &amp; history</h2><button class="x" data-close aria-label="Close">×</button></div>
-  <div class="row"><span class="sect">⭐ Saved phrases</span><button id="clear-sv" class="mini" type="button">Clear</button></div>
+  <div class="row"><span class="sect">Saved phrases</span><button id="clear-sv" class="mini" type="button">Clear</button></div>
   <div id="sv-list" class="cvlog"></div>
   <div class="row"><span class="sect">Recent translations</span><button id="clear-hs" class="mini" type="button">Clear</button></div>
   <div id="hs-list" class="cvlog"></div>
@@ -1162,7 +1170,7 @@ h1{font-size:clamp(2.1rem,6.4vw,3.8rem);filter:drop-shadow(0 6px 30px rgba(124,9
     <h1>Any language.<br>Instantly understood.</h1>
     <p class="sub">Point me at a screen, a photo or a video and I'll read it, name the language and translate it. Tap a card or just say “Orvex” and what you need.</p>
     <p id="caption">Hi, I'm ORVEX!</p>
-    <button id="stop-speak" class="pill" hidden>■ Stop speaking</button>
+    <button id="stop-speak" class="pill" hidden>Stop speaking</button>
     <p id="heard" class="heard"></p>
   </section>
 
@@ -1180,13 +1188,13 @@ h1{font-size:clamp(2.1rem,6.4vw,3.8rem);filter:drop-shadow(0 6px 30px rgba(124,9
     </div>
     <div id="tx-out" class="trout" hidden></div>
     <div id="tx-actions" class="acts" hidden>
-      <button id="tx-speak" class="mini" type="button">🔊 Listen</button>
+      <button id="tx-speak" class="mini" type="button">Listen</button>
       <button id="tx-copy" class="mini" type="button">Copy</button>
       <button id="tx-share" class="mini" type="button" hidden>Share</button>
-      <button id="tx-save" class="mini" type="button">⭐ Save</button>
-      <button id="tx-explain" class="mini ai" type="button">✨ Explain</button>
-      <button id="tx-simple" class="mini ai" type="button">✨ Simplify</button>
-      <button id="tx-reply" class="mini ai" type="button">✨ Reply ideas</button>
+      <button id="tx-save" class="mini" type="button">Save</button>
+      <button id="tx-explain" class="mini ai" type="button">Explain</button>
+      <button id="tx-simple" class="mini ai" type="button">Simplify</button>
+      <button id="tx-reply" class="mini ai" type="button">Reply ideas</button>
     </div>
     <div id="tx-ai" class="aibox" hidden></div>
   </section>
@@ -1227,8 +1235,8 @@ h1{font-size:clamp(2.1rem,6.4vw,3.8rem);filter:drop-shadow(0 6px 30px rgba(124,9
     </button>
   </section>
   <div class="row" style="justify-content:center">
-    <button id="b-saved" class="pill" type="button">⭐ Saved &amp; history</button>
-    <button id="b-lab" class="pill" type="button">📊 Language Lab (test results)</button>
+    <button id="b-saved" class="pill" type="button">Saved &amp; history</button>
+    <button id="b-lab" class="pill" type="button">Language Lab (test results)</button>
   </div>
   <section class="phonebox" id="phonebox">
     <img id="qr-home" class="qrimg" src="/qr.png" alt="QR code: scan to open https://qr-codes.io/DuSGc9" onerror="this.outerHTML='<span class=note>QR image not found. Put URL QR Code.png next to orvex.py, then run: python orvex.py --embed-qr</span>'">
@@ -1253,7 +1261,7 @@ h1{font-size:clamp(2.1rem,6.4vw,3.8rem);filter:drop-shadow(0 6px 30px rgba(124,9
       <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
     </button>
     <input id="input" type="text" placeholder="Type or say “Orvex …”" maxlength="1000" required>
-    <button type="submit" class="send" title="Send" aria-label="Send">➤</button>
+    <button type="submit" class="send" title="Send" aria-label="Send"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12h15M13 6l6 6-6 6"/></svg></button>
   </form>
 </div>
 <div id="status"><i></i><span id="status-text">Online</span></div>
@@ -1441,7 +1449,7 @@ async function sendMessage(text) {
     let data = {};
     try { data = await res.json(); } catch (e) {}
     typing.remove();
-    if (!res.ok) { addMessage("⚠ " + (data.error || "Something went wrong (error " + res.status + ")."), "bot"); Robot.setMood("idle", "Ready when you are."); return; }
+    if (!res.ok) { addMessage((data.error || "Something went wrong (error " + res.status + ")."), "bot"); Robot.setMood("idle", "Ready when you are."); return; }
     if (data.command) heard.textContent += "  →  " + (data.label || data.command);
     addMessage(data.reply, "bot");
     chatHist.push({ role: "user", text: text }, { role: "bot", text: data.reply });
@@ -1452,7 +1460,7 @@ async function sendMessage(text) {
     runAction(data.command);
   } catch (err) {
     typing.remove();
-    addMessage("⚠ I couldn't reach the server. Check your internet connection and try again.", "bot");
+    addMessage("I couldn't reach the server. Check your internet connection and try again.", "bot");
     Robot.setMood("idle", "Connection problem.");
   }
 }
@@ -1751,7 +1759,7 @@ $("tr-btn").addEventListener("click", async () => {
   try {
     out.textContent = await translateText(text, target); lastTranslation = out.textContent; lastTarget = target;
     $("tr-speak").hidden = false; Robot.setMood("happy", "Translated!"); speak("Here is the translation into " + name + ".");
-  } catch (err) { out.textContent = "⚠ " + err.message; Robot.setMood("idle", "Ready when you are."); }
+  } catch (err) { out.textContent = err.message; Robot.setMood("idle", "Ready when you are."); }
 });
 $("tr-speak").addEventListener("click", () => speak(lastTranslation, lastTarget, true));
 
@@ -1783,9 +1791,9 @@ function startRec(lang, o) {   // one wrapper for the browser's speech recognise
 // ---------- Saved phrases + history ----------
 const Book = { get(k) { try { return JSON.parse(store.get(k, "[]")); } catch (e) { return []; } }, put(k, a) { store.set(k, JSON.stringify(a)); } };
 function addHist(it) { const a = Book.get("orvex-hist"); if (a[0] && a[0].s === it.s && a[0].t === it.t) return; a.unshift(it); Book.put("orvex-hist", a.slice(0, 40)); }
-function saveItem(it) { const a = Book.get("orvex-saved"); if (a.some((x) => x.s === it.s && x.t === it.t)) { toast("Already saved"); return; } a.unshift(it); Book.put("orvex-saved", a.slice(0, 200)); toast("Saved ⭐"); }
+function saveItem(it) { const a = Book.get("orvex-saved"); if (a.some((x) => x.s === it.s && x.t === it.t)) { toast("Already saved"); return; } a.unshift(it); Book.put("orvex-saved", a.slice(0, 200)); toast("Saved"); }
 function renderBook() {
-  [["orvex-saved", "sv-list", "No saved phrases yet. Press ⭐ Save under any translation."], ["orvex-hist", "hs-list", "Nothing yet."]].forEach(([k, id, empty]) => {
+  [["orvex-saved", "sv-list", "No saved phrases yet. Press Save under any translation."], ["orvex-hist", "hs-list", "Nothing yet."]].forEach(([k, id, empty]) => {
     const box = $(id); box.textContent = ""; const a = Book.get(k);
     if (!a.length) { const p = document.createElement("p"); p.className = "note"; p.textContent = empty; box.appendChild(p); return; }
     a.forEach((it, i) => {
@@ -1793,9 +1801,9 @@ function renderBook() {
       const s = document.createElement("div"); s.className = "bk-s"; s.textContent = it.s;
       const o = document.createElement("div"); o.className = "bk-o"; o.textContent = it.o;
       const r = document.createElement("div"); r.className = "row";
-      mk(r, "🔊", () => speak(it.o, BCP[it.t] || it.t, true)); mk(r, "Copy", () => copyText(it.o));
+      mk(r, "Listen", () => speak(it.o, BCP[it.t] || it.t, true)); mk(r, "Copy", () => copyText(it.o));
       if (k === "orvex-saved") mk(r, "Remove", () => { const arr = Book.get(k); arr.splice(i, 1); Book.put(k, arr); renderBook(); });
-      else mk(r, "⭐ Save", () => saveItem(it));
+      else mk(r, "Save", () => saveItem(it));
       d.append(s, o, r); box.appendChild(d);
     });
   });
@@ -1835,7 +1843,7 @@ async function runQuick(manual) {
     clearTimeout(histTimer); histTimer = setTimeout(() => addHist(txCur), 2500);
   } catch (err) {
     if (seq !== txSeq) return;
-    out.classList.remove("busy"); out.textContent = "⚠ " + err.message; $("tx-actions").hidden = true;
+    out.classList.remove("busy"); out.textContent = err.message; $("tx-actions").hidden = true;
     if (manual) Robot.setMood("idle", "Ready when you are.");
   }
 }
@@ -1849,13 +1857,13 @@ $("tx-copy").addEventListener("click", () => { if (txCur) copyText(txCur.o); });
 $("tx-save").addEventListener("click", () => { if (txCur) saveItem(txCur); });
 if (navigator.share) { $("tx-share").hidden = false; $("tx-share").addEventListener("click", () => { if (txCur) navigator.share({ text: txCur.o }).catch(() => {}); }); }
 async function askAI(mode, text, lang, box) {
-  box.hidden = false; box.textContent = "✨ Thinking…";
+  box.hidden = false; box.textContent = "Thinking…";
   try {
     const r = await fetch("/api/ai", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode, text, lang: langName(lang) }) });
     const d = await r.json();
     if (!r.ok) throw new Error(d.error || "AI request failed");
     box.textContent = d.text;
-  } catch (e) { box.textContent = "⚠ " + e.message; }
+  } catch (e) { box.textContent = e.message; }
 }
 $("tx-explain").addEventListener("click", () => { if (txCur) askAI("explain", txCur.s, txCur.t, $("tx-ai")); });
 $("tx-simple").addEventListener("click", () => { if (txCur) askAI("simplify", txCur.o, txCur.t, $("tx-ai")); });
@@ -1868,7 +1876,7 @@ document.addEventListener("click", async (e) => {   // tap a word in a translati
   const r = w.getBoundingClientRect();
   tip.style.left = Math.max(8, Math.min(window.innerWidth - 250, r.left)) + "px"; tip.style.top = (r.bottom + 8) + "px";
   tip.textContent = word + " → …"; tip.hidden = false;
-  try { tip.textContent = word + " → " + await translateText(word, back); } catch (err) { tip.textContent = "⚠ " + err.message; }
+  try { tip.textContent = word + " → " + await translateText(word, back); } catch (err) { tip.textContent = err.message; }
 });
 
 // ---------- AI status + optional key ----------
@@ -1876,7 +1884,7 @@ async function loadConfig() {
   try {
     const d = await (await fetch("/api/config")).json();
     aiOn = !!d.ai; $("key-box").hidden = !d.can_set_key;
-    $("ai-chip").textContent = d.ai ? "✨ AI explain is ON" : "✨ AI explain is off (optional: add a free Gemini API key)";
+    $("ai-chip").textContent = d.ai ? "AI explain is ON" : "AI explain is off (optional: add a free Gemini API key)";
   } catch (e) {}
 }
 $("key-save").addEventListener("click", async () => {
@@ -1886,9 +1894,9 @@ $("key-save").addEventListener("click", async () => {
     const r = await fetch("/api/set-key", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key: k, save: true }) });
     const d = await r.json(); if (!r.ok) throw new Error(d.error || "Couldn't save the key");
     $("key-in").value = "";
-    toast(d.warn ? "Key saved. Note: " + d.warn : (d.saved ? "AI key works and is saved ✨" : "AI key works for this session ✨"), 4000);
+    toast(d.warn ? "Key saved. Note: " + d.warn : (d.saved ? "AI key works and is saved" : "AI key works for this session"), 4000);
     loadConfig(); if (window.__orvexInfo) window.__orvexInfo(); window.dispatchEvent(new Event("orvex-ai"));
-  } catch (e) { toast("⚠ " + e.message, 5000); }
+  } catch (e) { toast(e.message, 5000); }
   finally { btn.disabled = false; }
 });
 loadConfig();
@@ -1929,8 +1937,8 @@ function itpInterim(t) {
     const seq = ++itp.seq;
     try {
       const tr = await translateText(t, $("itp-tgt").value, $("itp-src").value);
-      if (seq === itp.seq) { $("itp-tr").textContent = tr; if ($("itp-status").textContent.startsWith("⚠")) $("itp-status").textContent = "Listening… speak now."; }
-    } catch (e) { if (seq === itp.seq) $("itp-status").textContent = "⚠ " + e.message; }
+      if (seq === itp.seq) { $("itp-tr").textContent = tr; if ($("itp-status").dataset.err) { delete $("itp-status").dataset.err; $("itp-status").textContent = "Listening… speak now."; } }
+    } catch (e) { if (seq === itp.seq) { $("itp-status").dataset.err = "1"; $("itp-status").textContent = e.message; } }
   }, 900);
 }
 async function itpFinal(t) {
@@ -1945,7 +1953,7 @@ async function itpFinal(t) {
     const sm = document.createElement("small"); sm.textContent = t; ln.appendChild(sm);
     const log = $("itp-log"); log.appendChild(ln); log.scrollTop = log.scrollHeight;
     if ($("itp-say").checked) speak(tr, BCP[target] || target, true);
-  } catch (e) { $("itp-status").textContent = "⚠ " + e.message; }
+  } catch (e) { $("itp-status").dataset.err = "1"; $("itp-status").textContent = e.message; }
 }
 function srtTime(ms) { ms = Math.max(0, ms); const p = (n, l = 2) => String(n).padStart(l, "0"); return p(Math.floor(ms / 3600000)) + ":" + p(Math.floor(ms % 3600000 / 60000)) + ":" + p(Math.floor(ms % 60000 / 1000)) + "," + p(Math.floor(ms % 1000), 3); }
 $("itp-start").addEventListener("click", itpStart);
@@ -1978,7 +1986,7 @@ function cvSpeak(side) {
     onFinal: async (t) => {
       got = true; st.textContent = "Translating…";
       try { const tr = await translateText(t, to, from); cvAdd(side, t, tr, from, to); st.textContent = "Done. Your turn, or the other person's."; speak(tr, BCP[to] || to, true); }
-      catch (e) { st.textContent = "⚠ " + e.message; }
+      catch (e) { st.textContent = e.message; }
     },
     onError: (er) => { st.textContent = (er === "not-allowed" || er === "service-not-allowed") ? "Microphone blocked. Allow it in the address bar." : "I couldn't hear that (" + er + ")."; },
     onEnd: () => { cv.busy = false; btn.classList.remove("rec"); if (!got && /^(Listening|…)/.test(st.textContent)) st.textContent = "I didn't hear anything. Try again."; Robot.setMood("idle", "Ready when you are."); }
@@ -2038,7 +2046,7 @@ async function lensLoop() {
           }
           st.textContent = "Translated. Hold steady and move closer for sharper text.";
         } else st.textContent = "No text found. Try better light or move closer.";
-      } catch (e) { if (lens.on && mySeq === lens.seq) st.textContent = "⚠ " + e.message; }
+      } catch (e) { if (lens.on && mySeq === lens.seq) st.textContent = e.message; }
     }
     await wait(300);
   }
@@ -2063,7 +2071,7 @@ function renderLab(d) {
     row.append(el("span", "", l.name), bar, el("b", "", pct(l.model)));
     out.appendChild(row);
   });
-  out.appendChild(el("div", "sect", d.errors.length ? "Mistakes the detector made (" + d.errors.length + ")" : "No mistakes on this test set 🎉"));
+  out.appendChild(el("div", "sect", d.errors.length ? "Mistakes the detector made (" + d.errors.length + ")" : "No mistakes on this test set"));
   d.errors.forEach((e) => {
     const bk = el("div", "bk"); bk.style.margin = ".3rem 0";
     bk.append(el("div", "bk-o", e.text), el("div", "bk-s", "Truth: " + e.truth + "   →   ORVEX guessed: " + e.guess));
@@ -2076,7 +2084,7 @@ $("lab-run").addEventListener("click", async () => {
     const r = await fetch("/api/benchmark"), d = await r.json();
     if (!r.ok) throw new Error(d.error || "The test failed");
     renderLab(d); Robot.setMood("happy", "Test finished.", 3000);
-  } catch (e) { o.textContent = "⚠ " + e.message; Robot.setMood("idle", "Ready when you are."); }
+  } catch (e) { o.textContent = e.message; Robot.setMood("idle", "Ready when you are."); }
 });
 
 // ---------- Live audio (tab or system sound -> Whisper on this computer -> translation) ----------
@@ -2096,7 +2104,7 @@ async function ovlStatus() {
   try {
     const d = await (await fetch("/api/overlay/status")).json();
     live.ovl = !!d.running;
-    $("live-ovl").textContent = d.running ? "🪟 Hide floating window" : "🪟 Show floating window";
+    $("live-ovl").textContent = d.running ? "Hide floating window" : "Show floating window";
     $("live-ovl-note").textContent = !d.local ? "Only on the computer that runs ORVEX." : !d.available ? "Needs Python's built-in tkinter." : "";
   } catch (e) {}
 }
@@ -2126,7 +2134,8 @@ async function startLive() {
       $("lvl").style.width = Math.min(100, rms * 500) + "%";
     }, 100);
   } catch (e) {}
-  live.on = true; live.paused = false; liveUI(); setLive("Listening… the first words appear in a few seconds.");
+  live.on = true; live.paused = false; liveUI(); setLive(capPip.win ? "Listening… the first words appear in the floating window in a few seconds." : "Listening… the first words appear in a few seconds. Tip: press Float captions to keep them over your video.");
+  capPipPaint();
   Robot.setMood("listening", "Listening to the tab…");
   liveSeg();
 }
@@ -2176,9 +2185,10 @@ function liveSend(blob) {
       const tg = el("span", "tag2", d.language ? langName(d.language) : "Heard"); o.append(tg, document.createTextNode(text)); t.textContent = tr;
       row.append(o, t); const g = $("live-grid"); g.appendChild(row); g.scrollTop = g.scrollHeight;
       setLive("Listening…");
+      capPipPush(d.language || "", text, tr, target);
       if ($("live-say").checked) speak(tr, BCP[target] || target, true);
       if (live.ovl) fetch("/api/overlay/push", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ original: text, translation: tr, language: d.language || "" }) }).catch(() => {});
-    } catch (e) { setLive("⚠ " + e.message); }
+    } catch (e) { setLive(e.message); }
   });
 }
 function pauseLive() { if (!live.on || live.paused) return false; live.paused = true; try { if (live.rec && live.rec.state === "recording") live.rec.stop(); } catch (e) {} liveUI(); setLive("Paused."); return true; }
@@ -2191,6 +2201,7 @@ function stopLive(msg) {
   try { if (live.ctx) live.ctx.close(); } catch (e) {}
   live.full = live.stream = live.ctx = live.an = live.rec = null; liveUI();
   setLive(typeof msg === "string" ? msg : "Stopped."); Robot.setMood("idle", "Ready when you are.");
+  capPipPaint();
   return true;
 }
 $("live-start").addEventListener("click", startLive);
@@ -2204,8 +2215,62 @@ $("live-ovl").addEventListener("click", async () => {
     const r = await fetch("/api/overlay/" + (live.ovl ? "stop" : "start"), { method: "POST" }), d = await r.json();
     if (!r.ok) throw new Error(d.error || "Couldn't open the window");
     live.ovl = !!d.running; ovlStatus();
-  } catch (e) { $("live-ovl-note").textContent = "⚠ " + e.message; }
+  } catch (e) { $("live-ovl-note").textContent = e.message; }
 });
+
+// ---------- Floating captions: a small always-on-top window (Document Picture-in-Picture). The translation shows over the video or
+// meeting you are watching, not inside the ORVEX tab. It stays when you switch tabs or minimize ORVEX. ----------
+const capPip = { win: null, tag: null, prev: null, cur: null, orig: null, size: 28, lines: [] };
+try { const z = parseInt(localStorage.getItem("orvex-pip-size") || "", 10); if (z >= 14 && z <= 72) capPip.size = z; } catch (e) {}
+function capPipUI() { const b = $("live-pip"); if (b) b.textContent = capPip.win ? "Close floating captions" : "Float captions over other windows"; }
+function capPipPaint() {
+  if (!capPip.win) return;
+  const L = capPip.lines, last = L[L.length - 1], before = L[L.length - 2];
+  capPip.tag.textContent = last ? (last.lang ? langName(last.lang) + "  →  " + langName(last.target) : "LIVE") : (live.on ? "LISTENING" : "WAITING");
+  capPip.prev.textContent = before ? before.tr : "";
+  capPip.cur.textContent = last ? last.tr : (live.on ? "Listening for speech…" : "Press Start in ORVEX and choose the tab or screen to translate.");
+  capPip.orig.textContent = last && last.orig !== last.tr ? last.orig : "";
+  capPip.cur.style.fontSize = capPip.size + "px"; capPip.prev.style.fontSize = Math.round(capPip.size * 0.62) + "px";
+}
+function capPipPush(lang, orig, tr, target) {
+  capPip.lines = capPip.lines.concat([{ lang, orig, tr, target }]).slice(-2);
+  capPipPaint();
+}
+async function toggleCapPip() {
+  const note = $("live-pip-note");
+  if (capPip.win) { try { capPip.win.close(); } catch (e) {} return; }
+  if (!window.documentPictureInPicture) {
+    note.textContent = "Needs Chrome or Edge 116+ on a computer. To get see-through captions over every app, run ORVEX on your computer with Start_ORVEX.bat.";
+    return;
+  }
+  try {
+    const pw = await window.documentPictureInPicture.requestWindow({ width: 600, height: 210 });
+    const d = pw.document, st = d.createElement("style");
+    st.textContent = "html,body{margin:0;height:100%;background:#050813;color:#fff;font-family:system-ui,'Segoe UI',Roboto,sans-serif;overflow:hidden}" +
+      ".w{box-sizing:border-box;height:100%;display:flex;flex-direction:column;gap:4px;padding:8px 14px 10px;border-top:3px solid #22d3ee}" +
+      ".top{display:flex;align-items:center;justify-content:space-between;gap:8px}.tag{color:#22d3ee;font-weight:700;font-size:12px;letter-spacing:.08em}" +
+      ".ctl button{background:#161a33;color:#cfd6ff;border:0;border-radius:8px;padding:3px 9px;margin-left:4px;font-size:12px;cursor:pointer}.ctl button:hover{background:#2a3160}" +
+      ".prev{color:#8fb6c9;line-height:1.25}.cur{flex:1;font-weight:700;line-height:1.25;overflow:auto;word-wrap:break-word}.orig{color:#7f8fb0;font-size:13px;line-height:1.3;max-height:3.6em;overflow:hidden}";
+    d.head.appendChild(st);
+    const mk = (tag, cls, txt) => { const e = d.createElement(tag); if (cls) e.className = cls; if (txt) e.textContent = txt; return e; };
+    const w = mk("div", "w"), top = mk("div", "top"), ctl = mk("span", "ctl");
+    capPip.tag = mk("span", "tag", "WAITING"); capPip.prev = mk("div", "prev"); capPip.cur = mk("div", "cur"); capPip.orig = mk("div", "orig");
+    [capPip.prev, capPip.cur, capPip.orig].forEach((e) => e.setAttribute("dir", "auto"));
+    const bump = (n) => { capPip.size = Math.max(14, Math.min(72, capPip.size + n)); try { localStorage.setItem("orvex-pip-size", String(capPip.size)); } catch (e) {} capPipPaint(); };
+    const bA = mk("button", "", "A-"), bB = mk("button", "", "A+"), bC = mk("button", "", "Clear");
+    bA.title = "Smaller text"; bB.title = "Bigger text"; bC.title = "Clear captions";
+    bA.addEventListener("click", () => bump(-4)); bB.addEventListener("click", () => bump(4));
+    bC.addEventListener("click", () => { capPip.lines = []; capPipPaint(); });
+    ctl.append(bA, bB, bC); top.append(capPip.tag, ctl); w.append(top, capPip.prev, capPip.cur, capPip.orig); d.body.appendChild(w);
+    capPip.win = pw; capPipUI(); capPipPaint(); note.textContent = "";
+    pw.addEventListener("pagehide", () => { capPip.win = null; capPipUI(); });
+  } catch (e) {
+    note.textContent = "Couldn't open the floating window: " + (e && e.message ? e.message : e);
+  }
+}
+$("live-pip").addEventListener("click", toggleCapPip);
+window.orvexFloatCaptions = toggleCapPip;
+capPipUI();
 
 // ---------- Phone panel + install ----------
 function openPhone() { openPanel("phone"); $("qr-url").textContent = QR_LINK; }
@@ -2217,7 +2282,7 @@ window.addEventListener("appinstalled", () => { deferredInstall = null; showInst
 async function doInstall() {
   if (!deferredInstall) {
     const ios = /iphone|ipad|ipod/i.test(navigator.userAgent);
-    toast(ios ? "iPhone/iPad: tap Share ⬆ then “Add to Home Screen”." : !window.isSecureContext ? "Install needs https or localhost. Open ORVEX at http://127.0.0.1:5000 on this computer, or host it online (https)." : "In Chrome or Edge: open the ⋮ menu → “Install ORVEX” (or use the install icon in the address bar).", 7000);
+    toast(ios ? "iPhone/iPad: tap Share, then “Add to Home Screen”." : !window.isSecureContext ? "Install needs https or localhost. Open ORVEX at http://127.0.0.1:5000 on this computer, or host it online (https)." : "In Chrome or Edge: open the ⋮ menu → “Install ORVEX” (or use the install icon in the address bar).", 7000);
     return;
   }
   deferredInstall.prompt(); try { await deferredInstall.userChoice; } catch (e) {} deferredInstall = null;
@@ -2432,15 +2497,15 @@ Robot.setMood("happy", "Hi, I'm ORVEX!", 3000);
   // ----- phrase card (used by "Say anything" and by lessons) -----
   async function explain(d, code, box) {
     if (!info.ai) { toast("Add a free Gemini key in Settings to unlock explanations"); return; }
-    box.hidden = false; box.textContent = "✨ Thinking…";
+    box.hidden = false; box.textContent = "Thinking…";
     try {
       const r = await fetch("/api/learn", { method: "POST", headers: CT, body: JSON.stringify({ mode: "explain", en: d.en || "", tgt: d.text, lang: L.name || langName(code) }) });
       const j = await r.json(); if (!r.ok) throw new Error(j.error || "Tutor error"); box.textContent = j.text;
-    } catch (e) { box.textContent = "⚠ " + netMsg(e); }
+    } catch (e) { box.textContent = netMsg(e); }
   }
   function speakCheck(target, code, out) {
     if (!SpeechRec) { out.textContent = "Voice check needs Chrome or Edge."; return; }
-    stopListening(); stopAudio(); out.className = "lt-res"; out.textContent = "🎤 Listening… say it now";
+    stopListening(); stopAudio(); out.className = "lt-res"; out.textContent = "Listening… say it now";
     let got = false;
     const r = startRec(BCP[code] || code, {
       continuous: false,
@@ -2448,11 +2513,11 @@ Robot.setMood("happy", "Hi, I'm ORVEX!", 3000);
       onFinal: (t) => {
         got = true; const s = Math.round(sim(t, target) * 100);
         out.className = "lt-res " + (s >= 60 ? "good" : "try");
-        out.textContent = (s >= 85 ? "🌟 Amazing! Perfect, great job! 🎉 " : s >= 60 ? "👏 Good job! Really close! " : "💪 Almost! Listen once more and try again. ") + "I heard: “" + t + "” (" + s + "%)";
+        out.textContent = (s >= 85 ? "Amazing! Perfect, great job! " : s >= 60 ? "Good job! Really close! " : "Almost! Listen once more and try again. ") + "I heard: “" + t + "” (" + s + "%)";
         if (s >= 60) { addXP(2); confetti(); Robot.setMood("excited", s >= 85 ? "Amazing!" : "Good job!", 2500); speak(s >= 85 ? "Amazing! Great job!" : "Good job!", "en"); }
       },
       onError: (er) => { out.textContent = (er === "not-allowed" || er === "service-not-allowed") ? "Microphone blocked. Allow it in the address bar." : "I couldn't hear that (" + er + ")."; },
-      onEnd: () => { if (!got && /^(🎤|…)/.test(out.textContent)) out.textContent = "I didn't hear anything. Try again."; setTimeout(tryAutoWake, 400); }
+      onEnd: () => { if (!got && /^(Listening|…)/.test(out.textContent)) out.textContent = "I didn't hear anything. Try again."; setTimeout(tryAutoWake, 400); }
     });
     if (!r) out.textContent = "Couldn't start the microphone.";
   }
@@ -2462,13 +2527,13 @@ Robot.setMood("happy", "Hi, I'm ORVEX!", 3000);
     const big = h("div", "lt-big", d.text); big.lang = code; c.appendChild(big);
     if (d.pron) { const p = h("div", "lt-pron"); p.appendChild(h("span", "lt-say", "Say it: ")); p.appendChild(h("b", "", d.pron)); c.appendChild(p); }
     if (d.literal) c.appendChild(h("div", "lt-lit", "Word by word: " + d.literal));
-    if (d.note) c.appendChild(h("div", "lt-note", "💡 " + d.note));
+    if (d.note) c.appendChild(h("div", "lt-note", d.note));
     const row = h("div", "acts"), out = h("div", "lt-res"), box = h("div", "aibox"); box.hidden = true;
-    btn(row, "🔊 Listen", () => say(d.text, code, false));
-    btn(row, "🐢 Slow", () => say(d.text, code, true));
-    btn(row, "🎤 Say it", () => speakCheck(d.text, code, out));
-    btn(row, "⭐ Save", () => saveItem({ s: d.en || "", o: d.text, t: code }));
-    btn(row, "💡 Explain", () => explain(d, code, box), "mini ai");
+    btn(row, "Listen", () => say(d.text, code, false));
+    btn(row, "Slow", () => say(d.text, code, true));
+    btn(row, "Say it", () => speakCheck(d.text, code, out));
+    btn(row, "Save", () => saveItem({ s: d.en || "", o: d.text, t: code }));
+    btn(row, "Explain", () => explain(d, code, box), "mini ai");
     c.append(row, out, box);
     return c;
   }
@@ -2519,7 +2584,7 @@ Robot.setMood("happy", "Hi, I'm ORVEX!", 3000);
   // ----- say anything / topic lesson / offline pack -----
   async function teachPhrase() {
     const text = $("l-say").value.trim(); if (!text) return;
-    const out = $("l-card"); out.textContent = ""; out.appendChild(h("div", "note", "✨ Teaching…"));
+    const out = $("l-card"); out.textContent = ""; out.appendChild(h("div", "note", "Teaching…"));
     try {
       let d;
       if (info.ai) {
@@ -2531,17 +2596,17 @@ Robot.setMood("happy", "Hi, I'm ORVEX!", 3000);
         d = { en: text, text: tr, pron: "", note: "Add a free Gemini key in Settings to also get an easy pronunciation guide." };
       }
       out.textContent = ""; out.appendChild(phraseCard(d, L.code)); setTimeout(() => say(d.text, L.code, false), 200); addXP(3);
-    } catch (e) { out.textContent = ""; out.appendChild(h("div", "note", "⚠ " + netMsg(e))); }
+    } catch (e) { out.textContent = ""; out.appendChild(h("div", "note", netMsg(e))); }
   }
   async function topicLesson() {
     const topic = $("l-topic").value.trim(), note = $("l-topic-note"); if (!topic) return;
     if (!info.ai) { note.textContent = "Topic lessons need the free Gemini key (Settings). The ready-made lessons work without it."; return; }
-    note.textContent = "✨ Building your lesson…";
+    note.textContent = "Building your lesson…";
     try {
       const r = await fetch("/api/learn", { method: "POST", headers: CT, body: JSON.stringify({ mode: "topic", topic, lang: L.name }) });
       const j = await r.json(); if (!r.ok) throw new Error(j.error || "Tutor error");
       note.textContent = ""; startLesson(j.phrases, L.code, j.title, -1, j.phrases);
-    } catch (e) { note.textContent = "⚠ " + netMsg(e); }
+    } catch (e) { note.textContent = netMsg(e); }
   }
   async function prepOffline() {
     const lg = LESSONS && LESSONS.langs[L.code], note = $("l-offnote");
@@ -2589,13 +2654,13 @@ Robot.setMood("happy", "Hi, I'm ORVEX!", 3000);
     let key = "en", correct = p.en;
     if (s.k === "mc-en") {
       body.append(h("div", "lq", "What does this mean?")); const big = h("div", "lt-big", p.text); big.lang = code; body.appendChild(big);
-      const r = h("div", "acts"); btn(r, "🔊 Listen", () => say(p.text, code, false)); body.appendChild(r);
+      const r = h("div", "acts"); btn(r, "Listen", () => say(p.text, code, false)); body.appendChild(r);
     } else if (s.k === "mc-tgt") {
       key = "text"; correct = p.text;
       body.append(h("div", "lq", "How do you say this?"), h("div", "lt-big", p.en));
     } else {
       body.append(h("div", "lq", "Listen, then choose the meaning"));
-      const r = h("div", "acts"); btn(r, "🔊 Play again", () => say(p.text, code, false), "pill go big"); body.appendChild(r);
+      const r = h("div", "acts"); btn(r, "Play again", () => say(p.text, code, false), "pill go big"); body.appendChild(r);
       setTimeout(() => say(p.text, code, false), 250);
     }
     choices(p, key).forEach((v) => {
@@ -2604,8 +2669,8 @@ Robot.setMood("happy", "Hi, I'm ORVEX!", 3000);
     });
     body.appendChild(wrap);
   }
-  const PRAISE = ["Amazing! 🎉", "Great job! 🌟", "Fantastic! 👏", "You're crushing it! 🔥", "Brilliant! ✨", "Perfect! 💜", "Wow, well done! 🙌"];
-  const TRYAG = ["💪 So close! You've got this!", "😊 Nice try! Now you know it!", "🌱 Almost there! Mistakes mean you're learning!"];
+  const PRAISE = ["Amazing!", "Great job!", "Fantastic!", "You're crushing it!", "Brilliant!", "Perfect!", "Wow, well done!"];
+  const TRYAG = ["So close! You've got this!", "Nice try! Now you know it!", "Almost there! Mistakes mean you're learning!"];
   function answer(o, ok, correct, wrap, s) {
     wrap.querySelectorAll("button").forEach((b) => { b.disabled = true; });
     o.classList.add(ok ? "ok" : "bad");
@@ -2614,7 +2679,7 @@ Robot.setMood("happy", "Hi, I'm ORVEX!", 3000);
     if (ok) {
       P.correct++; P.xp += 10; addXP(10); tone(880, 120);
       const pr = PRAISE[Math.floor(Math.random() * PRAISE.length)];
-      foot.className = "lfoot good"; foot.appendChild(h("b", "", "✅ " + pr + " +10 XP"));
+      foot.className = "lfoot good"; foot.appendChild(h("b", "", pr + " +10 XP"));
       if (P.correct % 3 === 0) confetti();
       Robot.setMood("excited", pr, 1800); speak(stripEmoji(pr), "en");
     } else {
@@ -2626,9 +2691,9 @@ Robot.setMood("happy", "Hi, I'm ORVEX!", 3000);
     btn(foot, "Continue →", next, "pill go");
   }
   function confetti() {
-    const em = ["🎉", "✨", "⭐", "💜", "🌟"];
+    const cols = ["#f472b6", "#facc15", "#22d3ee", "#a78bfa", "#34d399"];
     for (let i = 0; i < 28; i++) {
-      const c = h("span", "cf", em[i % em.length]); c.style.left = Math.random() * 100 + "vw"; c.style.animationDelay = Math.random() * 0.6 + "s";
+      const c = h("span", "cf", ""); c.style.background = cols[i % cols.length]; c.style.left = Math.random() * 100 + "vw"; c.style.animationDelay = Math.random() * 0.6 + "s";
       document.body.appendChild(c); setTimeout(() => c.remove(), 3400);
     }
   }
@@ -2638,7 +2703,7 @@ Robot.setMood("happy", "Hi, I'm ORVEX!", 3000);
     if (P.unit >= 0) { const pr = getJ("orvex-learn-prog", {}); pr[P.code] = pr[P.code] || {}; pr[P.code][P.unit] = Math.max(pr[P.code][P.unit] || 0, stars); setJ("orvex-learn-prog", pr); }
     addXP(20); $("lp-bar").style.width = "100%";
     const w = h("div", "lwin");
-    w.append(h("div", "trophy", "🏆"), h("h2", "", "Lesson complete!"), h("div", "stars", "★".repeat(stars) + "☆".repeat(3 - stars)),
+    w.append(h("div", "trophy", "★"), h("h2", "", "Lesson complete!"), h("div", "stars", "★".repeat(stars) + "☆".repeat(3 - stars)),
       h("p", "sub", pct + "% correct · +" + (P.xp + 20) + " XP"));
     body.appendChild(w); confetti(); tone(660, 160); setTimeout(() => tone(990, 220), 170);
     Robot.setMood("excited", "Great job!", 3000); speak("Lesson complete! Great job.", "en");
@@ -2692,7 +2757,7 @@ Robot.setMood("happy", "Hi, I'm ORVEX!", 3000);
       if (i >= 0) {
         addMessage(text, "user"); input.value = "";
         const en = LESSONS.en && LESSONS.en[i] ? LESSONS.en[i] : "", nxt = list[(i + 1) % list.length][0];
-        const r = "🎉 Amazing! “" + list[i][0] + "”" + (en ? " means “" + en + "”" : "") + " in " + (L.name || "this language") + ". Perfect, good job! Want to try “" + nxt + "” next?";
+        const r = "Amazing! “" + list[i][0] + "”" + (en ? " means “" + en + "”" : "") + " in " + (L.name || "this language") + ". Perfect, good job! Want to try “" + nxt + "” next?";
         addMessage(r, "bot"); confetti(); Robot.setMood("excited", "Amazing!", 3000); speak("Amazing! Good job!", "en"); return Promise.resolve();
       }
     }
@@ -2735,19 +2800,21 @@ Robot.setMood("happy", "Hi, I'm ORVEX!", 3000);
   // ----- wake word: broader spellings + link to the desktop orb -----
   const _armWake = armWake;
   armWake = function () {
-    _armWake(); if (learnOn) toast("🎙 Listening… say your command");
+    _armWake(); if (learnOn) toast("Listening… say your command");
     if (info.desktop) _fetch("/api/desk/wake", { method: "POST" }).catch(() => {});
   };
   async function deskTick() {
-    if (!me) return;
     try {
       const r = await _fetch("/api/desk/ping", { method: "POST", headers: CT, body: JSON.stringify({ visible: !document.hidden }) });
       if (!r.ok) return;
       const d = await r.json(); info.desktop = !!d.desktop;
-      (d.cmds || []).forEach((c) => { if (c.cmd === "open") { if (c.say) sendMessage(c.say); else openTarget(c.target); } else if (c.cmd === "wake") openTarget("wake"); });
+      if (me) (d.cmds || []).forEach((c) => { if (c.cmd === "open") { if (c.say) sendMessage(c.say); else openTarget(c.target); } else if (c.cmd === "wake") openTarget("wake"); });
     } catch (e) {}
   }
   setInterval(deskTick, 2000);
+  deskTick();
+  // window closed (or the page is leaving): tell the desktop orb straight away so it appears at once
+  window.addEventListener("pagehide", () => { try { navigator.sendBeacon("/api/desk/ping", new Blob([JSON.stringify({ visible: false, closing: true })], { type: "application/json" })); } catch (e) {} });
   document.addEventListener("visibilitychange", deskTick);   // tell the desktop orb the moment the window is minimized or restored
   window.addEventListener("focus", deskTick);
 
@@ -2775,7 +2842,7 @@ Robot.setMood("happy", "Hi, I'm ORVEX!", 3000);
       if (c.ai) { b.hidden = true; return; }
       b.hidden = false; b.textContent = "";
       const t = document.createElement("span");
-      t.textContent = "✨ AI tutor is off. Add a free Gemini key so I can teach ANY language and any sentence you type, with easy pronunciation.";
+      t.textContent = "AI tutor is off. Add a free Gemini key so I can teach ANY language and any sentence you type, with easy pronunciation.";
       b.appendChild(t);
       if (c.can_set_key) { const k = document.createElement("button"); k.type = "button"; k.className = "mini ai"; k.textContent = "Add key"; k.addEventListener("click", () => { settings.hidden = false; }); b.appendChild(k); }
       else b.appendChild(document.createTextNode(" Set GEMINI_API_KEY on your host."));
@@ -2814,7 +2881,7 @@ Robot.setMood("happy", "Hi, I'm ORVEX!", 3000);
     function closeMenu() { menu.hidden = true; }
     function addBtn(icon, title, desc, fn) {
       const b = document.createElement("button"); b.type = "button";
-      const i = document.createElement("span"); i.className = "mm-i"; i.textContent = icon;
+      const i = document.createElement("span"); i.className = "mm-i"; i.textContent = icon; if (!icon) i.hidden = true;
       const t = document.createElement("span"); t.className = "mm-t";
       const bt = document.createElement("b"); bt.textContent = title; t.appendChild(bt);
       if (desc) { const s = document.createElement("small"); s.textContent = desc; t.appendChild(s); }
@@ -2830,21 +2897,25 @@ Robot.setMood("happy", "Hi, I'm ORVEX!", 3000);
       sync(); place();
       if (wake) { orb.classList.remove("wake"); void orb.offsetWidth; orb.classList.add("wake"); }
     }
-    const ITEMS = [["🌐", "Translate text", "Type words, see them in any language", "translate"], ["🖥", "Read screen or photo", "Reads text and names the language", "screen"],
-      ["🎙", "Live interpreter", "Speak and get live subtitles", "itp"], ["💬", "Conversation", "Two people, two languages", "convo"],
-      ["📷", "Camera lens", "Translate signs and menus", "lens"], ["🎓", "Learn a language", "Duolingo-style lessons by AI", "learn"]];
+    const ITEMS = [["", "Translate text", "Type words, see them in any language", "translate"], ["", "Read screen or photo", "Reads text and names the language", "screen"],
+      ["", "Live interpreter", "Speak and get live subtitles", "itp"], ["", "Conversation", "Two people, two languages", "convo"],
+      ["", "Camera lens", "Translate signs and menus", "lens"], ["", "Learn a language", "Duolingo-style lessons by AI", "learn"]];
     function mainItems() {
       const h = document.createElement("div"); h.className = "mm-h"; h.textContent = "ORVEX"; menu.appendChild(h);
       ITEMS.forEach(([i, t, d, k]) => addBtn(i, t, d, () => { location.hash = "#open=" + k; }));
       const hr = document.createElement("div"); hr.className = "mm-hr"; menu.appendChild(hr);
-      addBtn("🫧", "Float orb over other windows", "Stays visible when you switch tabs or minimize", floatOrb);
-      addBtn("⛶", "Open full screen", "", fullscreen);
-      addBtn("✕", "Hide orb", "Say “Hey Orvex” to bring it back", hide);
+      addBtn("", "Float orb over other windows", "Stays visible when you switch tabs or minimize", floatOrb);
+      addBtn("", "Open full screen", "", fullscreen);
+      addBtn("", "Hide orb", "Say “Hey Orvex” to bring it back", hide);
     }
+    let floatWin = null;
     async function floatOrb(fromVoice) {
+      const quiet = fromVoice === "auto";   // opened by the "keep the orb on screen" setting: no pop-up messages
+      if (floatWin && !floatWin.closed) { try { floatWin.focus(); } catch (e) {} return; }
       if (!window.documentPictureInPicture) { toast("Floating orb needs Chrome or Edge on a computer. You can also install ORVEX as an app (Install button).", 5000); return; }
       try {
         const pw = await window.documentPictureInPicture.requestWindow({ width: 150, height: 200 });
+        floatWin = pw; pw.addEventListener("pagehide", () => { floatWin = null; });
         const d = pw.document, s = d.createElement("style");
         s.textContent = "body{margin:0;background:#0b0b14;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;height:100vh;font-family:system-ui,sans-serif;color:#cfd0ff;user-select:none}" +
           ".o{width:84px;height:84px;border-radius:50%;background:radial-gradient(circle at 30% 30%,#b9a6ff,#7c5cff 55%,#2b1f7a);box-shadow:0 0 28px #7c5cff99;position:relative;cursor:pointer;animation:f 2.4s ease-in-out infinite}" +
@@ -2860,13 +2931,35 @@ Robot.setMood("happy", "Hi, I'm ORVEX!", 3000);
         o.addEventListener("click", () => { mic.click(); });
         b.addEventListener("click", () => { try { window.focus(); } catch (e) {} });
         pw.addEventListener("pagehide", () => clearInterval(iv));
-        toast("The orb is floating over your other windows. It stays while this tab is open (closing the tab ends it).", 5000);
+        if (!quiet) toast("The orb is floating over your other windows. It stays when you switch tabs or minimize ORVEX. A web page cannot keep it after the tab is closed; Start_ORVEX.bat on your computer can.", 7000);
       } catch (e) {
-        toast(fromVoice === true ? "Browsers need a click for this: choose “Float orb” in the orb menu." : "Couldn't float the orb: " + (e && e.message ? e.message : e), 5000);
+        if (!quiet) toast(fromVoice === true ? "Browsers need a click for this: choose “Float orb” in the orb menu." : "Couldn't float the orb: " + (e && e.message ? e.message : e), 5000);
       }
     }
     window.orvexFloatOrb = floatOrb;
-    function ctxItems() { addBtn("🫧", "Float orb over other windows", "", floatOrb); addBtn("⛶", "Open full screen", "", fullscreen); addBtn("✕", "Hide orb", "Say “Hey Orvex” to bring it back", hide); }
+    // Setting "keep the orb on screen": browsers only allow a floating window after a click or key press, so it opens on the first one.
+    const AUTO_KEY = "orvex-float-auto";
+    const autoPref = () => { try { return localStorage.getItem(AUTO_KEY) === "1"; } catch (e) { return false; } };
+    const optFloat = document.getElementById("opt-float");
+    if (optFloat) {
+      if (!window.documentPictureInPicture) optFloat.closest("label").hidden = true;
+      optFloat.checked = autoPref();
+      optFloat.addEventListener("change", () => {
+        try { localStorage.setItem(AUTO_KEY, optFloat.checked ? "1" : "0"); } catch (e) {}
+        if (optFloat.checked) floatOrb(); else if (floatWin) { try { floatWin.close(); } catch (e) {} }
+      });
+    }
+    function armAutoFloat() {
+      if (!autoPref() || !window.documentPictureInPicture) return;
+      const go = () => {
+        if (desk || !me || floatWin) return;   // the desktop app has its own orb; wait until signed in
+        removeEventListener("pointerdown", go, true); removeEventListener("keydown", go, true);
+        if (autoPref()) floatOrb("auto");
+      };
+      addEventListener("pointerdown", go, true); addEventListener("keydown", go, true);
+    }
+    armAutoFloat();
+    function ctxItems() { addBtn("", "Float orb over other windows", "", floatOrb); addBtn("", "Open full screen", "", fullscreen); addBtn("", "Hide orb", "Say “Hey Orvex” to bring it back", hide); }
     function openMenu(build, x, y) {
       menu.textContent = ""; build(); menu.hidden = false;
       menu.style.left = clamp(x, 8, W() - menu.offsetWidth - 8) + "px"; menu.style.top = clamp(y, 8, H() - menu.offsetHeight - 8) + "px";
@@ -3055,6 +3148,7 @@ setTimeout(() => { if ("requestIdleCallback" in window) requestIdleCallback(() =
     $c("cp-size").value = String(s.size ?? 1);
     $c("cp-op").value = s.opacity ?? 0.92;
     $c("cp-eng").value = s.engine || "auto";
+    $c("cp-bg").value = s.bg || "glass";
     $c("cp-orig").checked = s.show_original !== false;
     const chip = $c("caps-chip"), tag = $c("caps-tag"), p = $c("cp-status");
     let txt = "", cls = "";
@@ -3091,6 +3185,7 @@ setTimeout(() => { if ("requestIdleCallback" in window) requestIdleCallback(() =
   tgt.addEventListener("change", () => save({ target: tgt.value }));
   $c("cp-size").addEventListener("change", (e) => save({ size: +e.target.value }));
   $c("cp-eng").addEventListener("change", (e) => save({ engine: e.target.value }));
+  $c("cp-bg").addEventListener("change", (e) => save({ bg: e.target.value }));
   $c("cp-orig").addEventListener("change", (e) => save({ show_original: e.target.checked }));
   let opT = 0; $c("cp-op").addEventListener("input", (e) => { clearTimeout(opT); const v = +e.target.value; opT = setTimeout(() => save({ opacity: v }), 150); });
   $c("c-caps").addEventListener("click", () => { openPanel("caps"); load(); });
@@ -3105,13 +3200,13 @@ setTimeout(() => { if ("requestIdleCallback" in window) requestIdleCallback(() =
   const q = (s) => document.querySelector(s);
   const STEPS = [
     { sel: ".orbwrap", t: "Meet ORVEX", d: "This is your assistant. Say “Hey Orvex” followed by what you need, like “translate good morning to Telugu”. It listens, answers and speaks back." },
-    { sel: ".quick", t: "Quick translate", d: "Type or paste anything, pick a language and press Translate. Use the mic to speak instead. Press ✨ for a simpler explanation." },
+    { sel: ".quick", t: "Quick translate", d: "Type or paste anything, pick a language and press Translate. Use the mic to speak instead. Press Simplify for a simpler explanation." },
     { sel: ".cards", t: "Everything ORVEX can do", d: "Read text from any screen or photo, interpret a live conversation, talk two ways with someone, use the camera lens, or translate sound from a tab. Click a card to open it." },
     { sel: "#c-caps", t: "Live captions", d: "Always on by default. It listens to this computer's sound (Zoom, videos, meetings), names the language and shows small see-through captions in your language. Drag them anywhere, right-click to change size or language." },
     { sel: ".modesw", t: "Translate or Learn", d: "Flip to Learn mode for short lessons in any language, with easy pronunciation and a quiz." },
     { sel: ".dock", t: "Talk to ORVEX", d: "Press the mic and just speak, or type a command here. When ORVEX is minimized, only the floating circle stays on your screen. Click it any time." },
     { sel: "#settings-btn", t: "Settings", d: "Speech speed, wake word, high contrast and live-caption controls live here. Press Ctrl + K for the command palette." },
-    { sel: "#phone-btn", t: "Take it with you", d: "Scan the QR code to put ORVEX on your phone like an app. You're all set. Replay this tour any time with the 🧭 button." }
+    { sel: "#phone-btn", t: "Take it with you", d: "Scan the QR code to put ORVEX on your phone like an app. You're all set. Replay this tour any time with the Tour button." }
   ];
   let i = 0, on = false, spot, card, block;
   function build() {
@@ -4135,9 +4230,9 @@ _LABELS = dict([(c, l) for c, l, _r, _p in COMMANDS] + list(_EXTRA_ACTIONS.items
 _VERB = re.compile(r"\b(open|show|start|launch|begin|read|scan|disable|hide|close|transcribe|stop|pause|resume|continue|turn|switch|take|go|display|translate|detect|make|"
                    r"increase|decrease|enable|use|play|float|pin|minimi[sz]e|quit|end|mute|unpause|zoom|look|check|see|run|what language|how good)\b", re.I)
 SMALLTALK = [
-    (re.compile(r"^\s*(hi|hello|hey|namaste|hola)\b[ !.]*$", re.I), "Hi there! 👋 I'm ORVEX. Ask me anything, or say “read my screen”, “live captions” or “open camera”.", "happy"),
-    (re.compile(r"\b(how are you|how's it going|how are u)\b", re.I), "I'm doing great, thanks for asking! 😊 How can I help you today?", "happy"),
-    (re.compile(r"\b(thanks|thank you|thx)\b", re.I), "You're welcome! 😊", "happy"),
+    (re.compile(r"^\s*(hi|hello|hey|namaste|hola)\b[ !.]*$", re.I), "Hi there! I'm ORVEX. Ask me anything, or say “read my screen”, “live captions” or “open camera”.", "happy"),
+    (re.compile(r"\b(how are you|how's it going|how are u)\b", re.I), "I'm doing great, thanks for asking! How can I help you today?", "happy"),
+    (re.compile(r"\b(thanks|thank you|thx)\b", re.I), "You're welcome!", "happy"),
     (re.compile(r"\b(what can you do|help|how do (i|you)|what do you do)\b", re.I),
      "I can chat about anything, translate text, read screens and photos, show live captions, run a two-way conversation, and teach you languages in Learn mode.", "happy"),
     (re.compile(r"\b(who are you|your name)\b", re.I), "I'm ORVEX, your friendly AI language assistant.", "happy"),
@@ -4203,9 +4298,9 @@ def chat():
             try:
                 tr = do_translate(txt, code)
             except TranslateError as exc:
-                return jsonify(reply="⚠ " + str(exc), command=None, mood="idle")
+                return jsonify(reply=str(exc), command=None, mood="idle")
             except Exception:
-                return jsonify(reply="⚠ Translation failed unexpectedly. Please try again.", command=None, mood="idle")
+                return jsonify(reply="Translation failed unexpectedly. Please try again.", command=None, mood="idle")
             return jsonify(reply="“%s” in %s is: %s" % (txt, lang_name(code), tr), command="translated", label="Translate",
                            speak_text=tr, speak_lang=code, mood="happy")
     # 2) feature commands (a fixed allowlist, matched with plain regular expressions)
@@ -4236,7 +4331,7 @@ def chat():
             for rx, reply, mood in SMALLTALK:
                 if rx.search(msg):
                     return jsonify(reply=reply, command=None, mood=mood)
-            return jsonify(reply="⚠ I couldn't reach my AI brain just now: " + str(exc), command=None, mood="idle")
+            return jsonify(reply="I couldn't reach my AI brain just now: " + str(exc), command=None, mood="idle")
     for rx, reply, mood in SMALLTALK:
         if rx.search(msg):
             return jsonify(reply=reply, command=None, mood=mood)
@@ -4272,7 +4367,7 @@ LESSON_EN = [
     "Thank you", "Please", "Sorry", "Yes", "No", "I don't understand",
     "Where is the bathroom?", "How much is this?", "Water, please", "Help!", "It is delicious", "Nice to meet you",
 ]
-LESSON_UNITS = [("Greetings", "👋", 0, 6), ("Politeness", "🙏", 6, 12), ("Travel & food", "🍜", 12, 18)]
+LESSON_UNITS = [("Greetings", "1", 0, 6), ("Politeness", "2", 6, 12), ("Travel & food", "3", 12, 18)]
 LESSON_LANGS = {
     "es": ("Spanish", "Español"), "fr": ("French", "Français"), "de": ("German", "Deutsch"), "hi": ("Hindi", "हिन्दी"),
     "ja": ("Japanese", "日本語"), "ko": ("Korean", "한국어"), "te": ("Telugu", "తెలుగు"), "ta": ("Tamil", "தமிழ்"),
@@ -4723,13 +4818,13 @@ ORB_KEY = "#010203"   # this colour becomes see-through on Windows (on Mac/Linux
 ORB_SIZE = 92
 ORB_PAD = 6
 ORB_MENU = [
-    ("", "🗔  Open ORVEX", "Bring the window back"),
-    ("translate", "🌐  Translate text", "Type words, see them in any language"),
-    ("screen", "🖥  Read screen or photo", "Reads text and tells you the language"),
-    ("itp", "🎙  Live interpreter", "Speak and get live subtitles"),
-    ("convo", "💬  Conversation", "Two people, two languages"),
-    ("lens", "📷  Camera lens", "Translate signs and menus"),
-    ("learn", "🎓  Learn a language", "Duolingo-style lessons by AI"),
+    ("", "Open ORVEX", "Bring the window back"),
+    ("translate", "Translate text", "Type words, see them in any language"),
+    ("screen", "Read screen or photo", "Reads text and tells you the language"),
+    ("itp", "Live interpreter", "Speak and get live subtitles"),
+    ("convo", "Conversation", "Two people, two languages"),
+    ("lens", "Camera lens", "Translate signs and menus"),
+    ("learn", "Learn a language", "Duolingo-style lessons by AI"),
 ]
 
 
@@ -4811,9 +4906,9 @@ class OrbWidget:
         self.flash, self.blink, self.ticks = 0, 0, 0
         self.menu_win = self.zone_win = self.zone_canvas = None
         self.ctx = tk.Menu(r, tearoff=0)
-        self.ctx.add_command(label="⛶  Open full screen", command=lambda: self.open_full())
-        self.ctx.add_command(label="🗔  Open ORVEX window", command=lambda: desk_open("translate"))
-        self.ctx.add_command(label="💬  Live captions on / off", command=lambda: self.toggle_captions())
+        self.ctx.add_command(label="Open full screen", command=lambda: self.open_full())
+        self.ctx.add_command(label="Open ORVEX window", command=lambda: desk_open("translate"))
+        self.ctx.add_command(label="Live captions on / off", command=lambda: self.toggle_captions())
         self.ctx.add_separator()
         self.ctx.add_command(label="Hide orb (say “Hey Orvex” to bring it back)", command=lambda: self.dismiss())
         self.ctx.add_command(label="Quit ORVEX completely", command=lambda: self.quit())
@@ -4967,10 +5062,10 @@ class OrbWidget:
         for key, title, desc in ORB_MENU:
             row(title, desc, lambda k=key: desk_open(k))
         tk.Frame(body, bg="#2a2660", height=1).pack(fill="x", pady=4)
-        row("💬  Live captions", "ON: listening to computer audio" if live_running() else "OFF: tap to turn on", self.toggle_captions)
-        row("⛶  Open full screen", "The whole ORVEX app, big", self.open_full)
-        row("✕  Hide orb", "Say “Hey Orvex” to bring it back", self.dismiss)
-        row("⏻  Quit ORVEX", "Stops the orb and the wake word", self.quit)
+        row("Live captions", "ON: listening to computer audio" if live_running() else "OFF: tap to turn on", self.toggle_captions)
+        row("Open full screen", "The whole ORVEX app, big", self.open_full)
+        row("Hide orb", "Say “Hey Orvex” to bring it back", self.dismiss)
+        row("Quit ORVEX", "Stops the orb and the wake word", self.quit)
         m.update_idletasks()
         mw, mh = m.winfo_reqwidth(), m.winfo_reqheight()
         px, py = menu_position(self.x, self.y, self.C, mw, mh, self.sw, self.sh)
@@ -5169,10 +5264,21 @@ def start_native_wake():
 # --- routes the page uses to talk to the desktop part ---
 @app.post("/api/desk/ping")
 def desk_ping():
+    """The ORVEX page tells the desktop orb whether it can be seen. Works on the sign-in screen too, but only from this computer
+    (a phone on the same Wi-Fi must not be able to hide or show the orb)."""
+    if not is_this_pc():
+        return jsonify(cmds=[], desktop=False)
     d = request.get_json(silent=True) or {}
     with _desk_lock:
+        if d.get("closing"):
+            # The window is being closed (or reloaded). Keep "alive" for 1.5 more seconds so a reload does not flash the orb,
+            # then the orb takes over the screen.
+            DESK["ping"], DESK["visible"] = time.time() - 4.5, False
+            return jsonify(cmds=[], desktop=DESK["on"])
         DESK["ping"], DESK["visible"] = time.time(), bool(d.get("visible"))
-        cmds, DESK["cmds"] = DESK["cmds"], []
+        cmds = []
+        if current_user():   # orb commands (open translate, wake...) wait until someone is signed in
+            cmds, DESK["cmds"] = DESK["cmds"], []
     return jsonify(cmds=cmds, desktop=DESK["on"])
 
 
@@ -5205,6 +5311,13 @@ def desk_quit():
 
 
 # --- start-up helpers for desktop mode ---
+def _orb_possible():
+    """True on a normal computer screen (Windows, Mac, or Linux with a display) that has Python's tkinter."""
+    if not _tk_available():
+        return False
+    return os.name == "nt" or sys.platform == "darwin" or bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+
 def run_desktop(port, window=True, native_wake=True):
     if sys.stdout is None:
         sys.stdout = sys.stderr = open(os.devnull, "w")
@@ -5225,10 +5338,22 @@ def run_desktop(port, window=True, native_wake=True):
     DESK["native"] = start_native_wake() if native_wake else "off"
     threading.Timer(1.0, live_autostart).start()   # live captions are ON by default
     print("ORVEX desktop mode is running (port %d)." % port)
-    print("  The orb is on your screen. Drag it, click it, right-click it. Drag it to the X in the middle to hide it.")
     print("  Background wake word 'Hey Orvex': " + DESK["native"])
+    try:
+        orb = OrbWidget(tk, port, window)
+    except Exception as exc:   # no screen to draw on: keep the server alive anyway
+        print("The orb could not open (%s). ORVEX keeps running without it." % str(exc)[:90])
+        if window:
+            launch_app_window(port)
+        try:
+            threading.Event().wait()
+        except KeyboardInterrupt:
+            pass
+        _stop_overlay_safe()
+        os._exit(0)
+    print("  The orb shows whenever the ORVEX window is closed or minimized. Drag it, click it, right-click it.")
+    print("  Drag it to the X in the middle of the screen to hide it. Live captions float over other windows.")
     print("  To stop everything: click the orb, then Quit ORVEX (or press Ctrl+C here).")
-    orb = OrbWidget(tk, port, window)
     if window:
         launch_app_window(port)
     try:
@@ -5429,9 +5554,10 @@ import atexit
 
 LIVE_FILE = os.path.join(DATA_DIR, "orvex_live.json")
 LIVE_STATUS_FILE = os.path.join(DATA_DIR, "orvex_live_status.json")
-LIVE_DEFAULT = {"on": True, "target": "en", "size": 1, "opacity": 0.92, "show_original": True, "engine": "auto", "x": -1, "y": -1, "test": 0}
+LIVE_DEFAULT = {"on": True, "target": "en", "size": 1, "opacity": 0.92, "show_original": True, "engine": "auto", "bg": "glass", "x": -1, "y": -1, "test": 0}
 LIVE_SIZES = [("Small", 12), ("Medium", 15), ("Large", 20), ("Huge", 28)]
 LIVE_ENGINES = ("auto", "whisper", "ai")
+LIVE_BGS = ("glass", "clear")   # glass = dark see-through box, clear = only the words (outlined), nothing behind them
 LIVE = {"proc": None, "t0": 0.0, "tries": 0}
 LIVE_LOG = os.path.join(DATA_DIR, "orvex_captions.log")
 
@@ -5469,6 +5595,7 @@ def live_clean(d):
         o["opacity"] = 0.92
     o["show_original"] = bool(d.get("show_original", True))
     o["engine"] = d.get("engine") if d.get("engine") in LIVE_ENGINES else "auto"
+    o["bg"] = d.get("bg") if d.get("bg") in LIVE_BGS else "glass"
     for k in ("x", "y", "test"):
         try:
             o[k] = int(d.get(k, -1 if k != "test" else 0))
@@ -5850,17 +5977,24 @@ class CaptionUI(object):
         r.title("ORVEX captions")
         r.overrideredirect(True)
         r.attributes("-topmost", True)
+        self.key = self.KEY
         r.configure(bg=self.KEY)
         try:
-            r.attributes("-transparentcolor", self.KEY)
+            r.attributes("-transparentcolor", self.KEY)   # Windows: this colour is see-through
         except Exception:
-            pass
+            if sys.platform == "darwin":   # macOS has its own switch for a see-through window
+                try:
+                    r.attributes("-transparent", True)
+                    self.key = "systemTransparent"
+                    r.configure(bg=self.key)
+                except Exception:
+                    pass
         try:
             r.attributes("-alpha", cfg["opacity"])
         except Exception:
             pass
         self.sw, self.sh = r.winfo_screenwidth(), r.winfo_screenheight()
-        self.cv = tk.Canvas(r, bg=self.KEY, highlightthickness=0, bd=0, cursor="fleur")
+        self.cv = tk.Canvas(r, bg=self.key, highlightthickness=0, bd=0, cursor="fleur")
         self.cv.pack()
         self.lines, self.state, self.msg, self.last, self.busy, self.warn_t = [], "starting", "Starting live captions…", 0.0, False, 0.0
         self.x, self.y = cfg["x"], cfg["y"]
@@ -5893,19 +6027,25 @@ class CaptionUI(object):
         cv.delete("all")
         st = {"y": pad}
 
+        clear = cfg.get("bg") == "clear"
+
         def txt(s, size, color, bold=False, width=None):
-            t = cv.create_text(pad + 6, st["y"], text=s, anchor="nw", fill=color, width=width or (W - 2 * pad - 12),
-                               font=(fam, max(7, int(size)), "bold" if bold else "normal"))
+            kw = dict(text=s, anchor="nw", width=width or (W - 2 * pad - 12), font=(fam, max(7, int(size)), "bold" if bold else "normal"))
+            if clear:   # nothing behind the words: a thin dark outline keeps them readable on any video
+                o = max(1, int(size / 13))
+                for dx, dy in ((-o, 0), (o, 0), (0, -o), (0, o), (-o, -o), (o, o), (-o, o), (o, -o)):
+                    cv.create_text(pad + 6 + dx, st["y"] + dy, fill="#000000", **kw)
+            t = cv.create_text(pad + 6, st["y"], fill=color, **kw)
             bb = cv.bbox(t)
             st["y"] = bb[3] + int(size * 0.4)
             return bb
         live_line = self.lines[-1] if self.lines else None
         if self.warn_t and time.time() - self.warn_t < 5:
-            chip, col = "⚠ " + self.msg, "#fbbf24"
+            chip, col = self.msg, "#fbbf24"
         elif self.state == "error":
-            chip, col = "⚠ " + self.msg, "#f87171"
+            chip, col = self.msg, "#f87171"
         elif cfg.get("paused"):
-            chip, col = "❚❚ Paused  (right-click to resume)", "#a5b4fc"
+            chip, col = "Paused  (right-click to resume)", "#a5b4fc"
         elif self.state == "starting":
             chip, col = "◌ " + self.msg, "#fbbf24"
         elif live_line:
@@ -5930,17 +6070,18 @@ class CaptionUI(object):
         x1, y1, x2, y2 = 1, 1, W - 1, H - 1
         pts = [x1 + r_, y1, x1 + r_, y1, x2 - r_, y1, x2 - r_, y1, x2, y1, x2, y1 + r_, x2, y1 + r_, x2, y2 - r_, x2, y2 - r_, x2, y2,
                x2 - r_, y2, x2 - r_, y2, x1 + r_, y2, x1 + r_, y2, x1, y2, x1, y2 - r_, x1, y2 - r_, x1, y1 + r_, x1, y1 + r_, x1, y1]
-        bg = cv.create_polygon(pts, smooth=True, fill="#070b1c", outline="#1fb6d4", width=1)
-        n = 28
-        span = max(1, W - 2 * r_)
-        accent = []
-        for i in range(n):
-            f = i / (n - 1)
-            c = "#%02x%02x%02x" % (int(124 + (34 - 124) * f), int(92 + (211 - 92) * f), int(255 + (238 - 255) * f))
-            accent.append(cv.create_rectangle(r_ + span * i / n, 1, r_ + span * (i + 1) / n + 1, 4, fill=c, outline=""))
-        for a in reversed(accent):
-            cv.tag_lower(a)
-        cv.tag_lower(bg)
+        if not clear:
+            bg = cv.create_polygon(pts, smooth=True, fill="#070b1c", outline="#1fb6d4", width=1)
+            n = 28
+            span = max(1, W - 2 * r_)
+            accent = []
+            for i in range(n):
+                f = i / (n - 1)
+                c = "#%02x%02x%02x" % (int(124 + (34 - 124) * f), int(92 + (211 - 92) * f), int(255 + (238 - 255) * f))
+                accent.append(cv.create_rectangle(r_ + span * i / n, 1, r_ + span * (i + 1) / n + 1, 4, fill=c, outline=""))
+            for a in reversed(accent):
+                cv.tag_lower(a)
+            cv.tag_lower(bg)
         cv.config(width=W, height=H)
         self.W = W
         if self.x < 0 or self.y < 0:
@@ -5975,6 +6116,12 @@ class CaptionUI(object):
         if self.warn_t and time.time() - self.warn_t > 5:
             self.warn_t, dirty = 0.0, True
         self.tick_n += 1
+        if self.tick_n % 25 == 0:   # every ~1.5 s: stay on top of Zoom, video players and anything that was just opened
+            try:
+                self.root.attributes("-topmost", True)
+                self.root.lift()
+            except Exception:
+                pass
         if self.tick_n % 10 == 0:
             try:
                 mt = os.path.getmtime(LIVE_FILE)
@@ -6042,25 +6189,30 @@ class CaptionUI(object):
         lm = tk.Menu(m, tearoff=0)
         for name, code in QUICK_LANGS:
             lm.add_radiobutton(label=name, variable=vt, value=code, command=lambda c=code: self.set("target", c))
-        m.add_cascade(label="🌐  Translate to", menu=lm)
+        m.add_cascade(label="Translate to", menu=lm)
         sm = tk.Menu(m, tearoff=0)
         for i, (n, _) in enumerate(LIVE_SIZES):
             sm.add_radiobutton(label=n, variable=vs, value=i, command=lambda i=i: self.set("size", i))
-        m.add_cascade(label="🔠  Text size  (Ctrl + wheel)", menu=sm)
+        m.add_cascade(label="Text size  (Ctrl + wheel)", menu=sm)
         om = tk.Menu(m, tearoff=0)
         for v in (0.5, 0.65, 0.8, 0.92, 1.0):
             om.add_radiobutton(label="%d%%" % int(v * 100), variable=vo, value=v, command=lambda v=v: self.set("opacity", v))
-        m.add_cascade(label="◐  Transparency", menu=om)
+        m.add_cascade(label="Transparency", menu=om)
+        vb = tk.StringVar(value=cfg.get("bg", "glass"))
+        bm = tk.Menu(m, tearoff=0)
+        for lab, val in (("Dark glass box", "glass"), ("Clear: only the words (see-through)", "clear")):
+            bm.add_radiobutton(label=lab, variable=vb, value=val, command=lambda v=val: self.set("bg", v))
+        m.add_cascade(label="Background", menu=bm)
         m.add_checkbutton(label="Show the original words", variable=vp, command=lambda: self.set("show_original", bool(vp.get())))
         em = tk.Menu(m, tearoff=0)
         for lab, val in (("Automatic", "auto"), ("AI (Gemini, best accuracy)", "ai"), ("Local (Whisper, no limits)", "whisper")):
             em.add_radiobutton(label=lab, variable=ve, value=val, command=lambda v=val: self.set("engine", v))
-        m.add_cascade(label="⚙  Speech engine", menu=em)
+        m.add_cascade(label="Speech engine", menu=em)
         m.add_separator()
-        m.add_command(label="▶  Resume" if cfg.get("paused") else "❚❚  Pause", command=self.toggle_pause)
+        m.add_command(label="Resume" if cfg.get("paused") else "Pause", command=self.toggle_pause)
         m.add_command(label="Clear captions", command=lambda: (setattr(self, "lines", []), self.render()))
         m.add_separator()
-        m.add_command(label="✕  Turn live captions off", command=self.turn_off)
+        m.add_command(label="Turn live captions off", command=self.turn_off)
         try:
             m.tk_popup(e.x_root, e.y_root)
         finally:
@@ -6139,7 +6291,6 @@ CMD gunicorn orvex:app -b 0.0.0.0:${PORT} --workers 1 --threads 4 --timeout 180
 
 SPACE_README = """---
 title: ORVEX
-emoji: 🔮
 colorFrom: indigo
 colorTo: purple
 sdk: docker
@@ -6212,6 +6363,11 @@ if __name__ == "__main__":
         ip = lan_ip()
         print("ORVEX is running at http://127.0.0.1:%d" % port)
         print("On your phone (same Wi-Fi): http://%s:%d   (or press the Phone button for a QR code)" % (ip, port))
+        if "--no-orb" not in args and not os.environ.get("ORVEX_NO_ORB") and _orb_possible():
+            # On a computer with a screen the floating orb comes with the website: it shows whenever the ORVEX page is
+            # closed, minimized or hidden. (Hosting sites such as Render use gunicorn and never reach this line.)
+            print("The ORVEX orb stays on your screen while ORVEX is closed or minimized.  (python orvex.py --no-orb turns it off)")
+            sys.exit(run_desktop(port, window=False) or 0)
         print("Tip: python orvex.py --app  gives you the desktop app with the floating orb.")
         threading.Timer(1.5, live_autostart).start()   # live captions are ON by default (turn off in the app)
         # host 0.0.0.0 lets phones on your Wi-Fi connect; debug stays OFF because the debugger would be exposed to the network.
