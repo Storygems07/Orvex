@@ -1,0 +1,6 @@
+.env
+.orvex_secret
+orvex_users.db
+orvex_live.json
+orvex_live_status.json
+__pycache__/
